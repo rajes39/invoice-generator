@@ -1,0 +1,6 @@
+{
+  "name": "SONALI ERP",
+  "description": "Professional GST Invoice Generator with CRM, inventory, and analytics features.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
