@@ -46,6 +46,35 @@ const applyCustomerPricing = (item: InvoiceItem, product: Product | undefined, c
 
 const fixedPriceToastMessage = (fixedPrice: number) => `Fixed MRP applied: ₹${fixedPrice.toFixed(2)} (No discount)`;
 
+const calculateLineDiscountMetrics = (item: Partial<InvoiceItem>) => {
+  const quantity = Number(item.quantity) || 0;
+  const sellingPrice = Number(item.sellingPrice) || 0;
+  const discountPercent = Number(item.discountPercent) || 0;
+  const subtotal = sellingPrice * quantity;
+  const discountAmount = subtotal * (discountPercent / 100);
+  const totalAfterDiscount = subtotal - discountAmount;
+
+  return {
+    mrp: sellingPrice,
+    subtotal,
+    discountPercent,
+    discountAmount,
+    totalAfterDiscount,
+  };
+};
+
+const calculateDiscountSummary = (items: Partial<InvoiceItem>[]) => {
+  return items.reduce((summary, item) => {
+    if (!item.productId) return summary;
+
+    const metrics = calculateLineDiscountMetrics(item);
+    summary.totalDiscountAmount += Number(metrics.discountAmount.toFixed(2));
+    summary.totalBill += Number(metrics.totalAfterDiscount.toFixed(2));
+
+    return summary;
+  }, { totalDiscountAmount: 0, totalBill: 0 });
+};
+
 interface InvoiceGeneratorTabProps {
   customers: Customer[];
   setCustomers: Dispatch<SetStateAction<Customer[]>>;
@@ -608,6 +637,7 @@ export function InvoiceGeneratorTab({
   };
 
   const totals = calculateInvoiceTotals();
+  const discountSummary = calculateDiscountSummary(items);
 
   // 6. Submit and Save Invoice (Supports Create or Edit)
   const handleSaveInvoice = (e: FormEvent) => {
@@ -1027,16 +1057,19 @@ export function InvoiceGeneratorTab({
             </span>
           </div>
 
-          <table className="w-full text-left min-w-[700px]">
+          <table className="w-full text-left min-w-[900px]">
             <thead>
               <tr className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider border-b border-slate-100 dark:border-slate-800 pb-2">
                 <th className="py-2.5 w-1/3">Product Info</th>
                 <th className="py-2.5 px-2 w-24">HSN Code</th>
                 <th className="py-2.5 px-2 w-24">Stock Avail</th>
+                <th className="py-2.5 px-2 w-28">MRP</th>
                 <th className="py-2.5 px-2 w-28">Rate (Ex. GST)</th>
                 <th className="py-2.5 px-2 w-16">Qty</th>
                 <th className="py-2.5 px-2 w-24">Discount %</th>
-                <th className="py-2.5 px-2 w-24">GST% Rate</th>
+                <th className="py-2.5 px-2 w-28">Discount Amount (₱)</th>
+                <th className="py-2.5 px-2 w-28">GST% Rate</th>
+                <th className="py-2.5 px-2 w-28 text-right">Total (After Discount)</th>
                 <th className="py-2.5 px-2 text-right">Row Net Amt</th>
                 <th className="py-2.5 w-12 text-center"></th>
               </tr>
@@ -1045,6 +1078,7 @@ export function InvoiceGeneratorTab({
               {items.map((item, index) => {
                 const productSpec = products.find(p => p.id === item.productId);
                 const maxVal = productSpec ? productSpec.currentStock : 9999;
+                const lineMetrics = calculateLineDiscountMetrics(item);
 
                 return (
                   <tr key={item.id} className="align-middle">
@@ -1157,6 +1191,11 @@ export function InvoiceGeneratorTab({
                       )}
                     </td>
 
+                    {/* MRP */}
+                    <td className="py-3 px-2 text-right font-mono text-xs dark:text-slate-100">
+                      ₹{lineMetrics.mrp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </td>
+
                     {/* Custom Pricing */}
                     <td className="py-3 px-2">
                       <div className="relative">
@@ -1201,6 +1240,11 @@ export function InvoiceGeneratorTab({
                       </div>
                     </td>
 
+                    {/* Discount Amount (₱) */}
+                    <td className="py-3 px-2 text-right font-mono text-xs dark:text-slate-100">
+                      ₹{lineMetrics.discountAmount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </td>
+
                     {/* Custom GST Selection */}
                     <td className="py-3 px-2">
                       <select
@@ -1213,6 +1257,11 @@ export function InvoiceGeneratorTab({
                         <option value={18}>18%</option>
                         <option value={28}>28%</option>
                       </select>
+                    </td>
+
+                    {/* Total (After Discount) */}
+                    <td className="py-3 px-2 text-right font-semibold font-mono text-xs dark:text-slate-100">
+                      ₹{lineMetrics.totalAfterDiscount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </td>
 
                     {/* Total Row net cost */}
@@ -1236,6 +1285,28 @@ export function InvoiceGeneratorTab({
               })}
             </tbody>
           </table>
+
+          <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3 justify-end">
+            <div className="rounded-2xl border border-rose-200/60 dark:border-rose-900/40 bg-rose-50/70 dark:bg-rose-950/20 px-4 py-3 flex items-center justify-between gap-3">
+              <div>
+                <div className="text-[10px] font-bold uppercase tracking-wider text-rose-700 dark:text-rose-300">Total Discount</div>
+                <div className="text-xs text-slate-500 dark:text-slate-300">Sum of item discount amounts across all line items</div>
+              </div>
+              <div className="font-mono text-lg font-bold text-rose-700 dark:text-rose-300">
+                ₹{discountSummary.totalDiscountAmount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-emerald-200/60 dark:border-emerald-900/40 bg-emerald-50/70 dark:bg-emerald-950/20 px-4 py-3 flex items-center justify-between gap-3">
+              <div>
+                <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-700 dark:text-emerald-300">Total Bill</div>
+                <div className="text-xs text-slate-500 dark:text-slate-300">Sum of discounted line totals before tax</div>
+              </div>
+              <div className="font-mono text-lg font-bold text-emerald-700 dark:text-emerald-300">
+                ₹{discountSummary.totalBill.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+            </div>
+          </div>
 
           <button
             type="button"
