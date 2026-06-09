@@ -1,19 +1,78 @@
 @import "tailwindcss";
 
-@theme {
-  --color-indigo-50: #F0F9F4;
-  --color-indigo-100: #E1F3E9;
-  --color-indigo-200: #C1E5D2;
-  --color-indigo-300: #93CEAF;
-  --color-indigo-400: #2E8B57;
-  --color-indigo-500: #217346;
-  --color-indigo-550: #1F7B4D;
-  --color-indigo-555: #1F7B4D;
-  --color-indigo-600: #1F7B4D;
-  --color-indigo-650: #1B6941;
-  --color-indigo-700: #175A38;
-  --color-indigo-805: #144E31;
-  --color-indigo-800: #12472C;
-  --color-indigo-900: #0D3420;
-  --color-indigo-950: #061A10;
+@layer base {
+  :root {
+    color-scheme: light;
+    --color-primary: #c2713a;
+    --color-primary-light: #e8a96a;
+    --color-primary-dark: #9a5228;
+    --color-bg: #fdf6ee;
+    --color-bg-secondary: #faecd8;
+    --color-border: #e8c99a;
+    --color-text: #3d2b1a;
+    --color-text-muted: #7a5c3a;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: #fdf6ee;
+    color: #3d2b1a;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  /* Sidebar background */
+  aside, nav {
+    background-color: #7a3e1a !important;
+  }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #faecd8;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #c2713a;
+    border-radius: 3px;
+  }
 }
+
+@layer utilities {
+  .glass-card {
+    background-color: rgba(255, 248, 235, 0.95);
+    backdrop-filter: blur(12px);
+    border: 1px solid #e8c99a;
+  }
+
+  /* Primary button override */
+  .btn-primary {
+    background-color: #c2713a;
+    color: white;
+  }
+  .btn-primary:hover {
+    background-color: #9a5228;
+  }
+
+  /* Active nav item */
+  .nav-active {
+    background-color: #c2713a !important;
+    color: white !important;
+  }
+  }
+
+  @media print {
+  body * { visibility: hidden; }
+  .invoice-print-area, .invoice-print-area * { visibility: visible; }
+  .invoice-print-area { position: absolute; left: 0; top: 0; width: 100%; }
+  @page { size: A4; margin: 10mm; }
+  }

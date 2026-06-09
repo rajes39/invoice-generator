@@ -395,7 +395,7 @@ export function PurchasesTab({
             continue;
           }
 
-          const productMatch = updatedProducts.find((item) => item.name.toLowerCase() === productName.toLowerCase() || (productPartNumber && item.partNumber.toUpperCase() === productPartNumber));
+          const productMatch = updatedProducts.find((item) => item.name.toLowerCase() === productName.toLowerCase() || (productPartNumber && (item.partNumber || '').toUpperCase() === productPartNumber));
           if (!productMatch) {
             errors.push(`Row ${rowNumber}: Product "${productName}" not found.`);
             continue;

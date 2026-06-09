@@ -1,65 +1,43 @@
 import { useState, useEffect, Dispatch, SetStateAction, FormEvent } from 'react';
-import { Customer, Product, Invoice, InvoiceItem, BusinessProfile, CustomerDiscountRule } from '../types';
+import { Customer, Product, Invoice, InvoiceItem, BusinessProfile, CustomerDiscountRule, CustomerDiscount, CustomerNetRate } from '../types';
 import { Plus, Trash, UserPlus, FileText, Calendar, Percent, IndianRupee, AlertTriangle, Check, ChevronDown, Sparkles } from 'lucide-react';
 import { INDIAN_STATES } from './CustomersTab';
-
-const getCustomerNetPrice = (customerId: string | undefined, productId: string) => {
-  if (!customerId) return null;
-
-  try {
-    const stored = localStorage.getItem('customerNetPrices');
-    if (!stored) return null;
-
-    const parsed = JSON.parse(stored);
-    const customerPrices = parsed?.[customerId];
-    if (!customerPrices || typeof customerPrices !== 'object') return null;
-
-    const fixedPrice = Number(customerPrices[productId]);
-    return Number.isFinite(fixedPrice) && fixedPrice > 0 ? fixedPrice : null;
-  } catch (error) {
-    console.error('Error reading customerNetPrices', error);
-    return null;
-  }
-};
-
-const applyCustomerPricing = (item: InvoiceItem, product: Product | undefined, customerId: string | undefined) => {
-  const fixedPrice = product ? getCustomerNetPrice(customerId, product.id) : null;
-  const appliedPrice = fixedPrice ?? product?.sellingPrice ?? item.sellingPrice ?? 0;
-  const quantity = item.quantity || 1;
-  const isNetPriceApplied = fixedPrice !== null;
-  const lineDiscountPercent = isNetPriceApplied ? 0 : (item.discountPercent || 0);
-  const subtotal = appliedPrice * quantity;
-  const discountAmount = subtotal * (lineDiscountPercent / 100);
-  const taxAmount = (subtotal - discountAmount) * ((item.gstRate || product?.gstRate || 18) / 100);
-  const totalAmount = subtotal - discountAmount + taxAmount;
-
-  return {
-    sellingPrice: appliedPrice,
-    discountPercent: lineDiscountPercent,
-    discountAmount,
-    netPriceApplied: isNetPriceApplied ? appliedPrice : undefined,
-    subtotal,
-    taxAmount,
-    totalAmount,
-  };
-};
+import supabase from '../supabase';
+import pricingService from '../services/pricingService';
 
 const fixedPriceToastMessage = (fixedPrice: number) => `Fixed MRP applied: ₹${fixedPrice.toFixed(2)} (No discount)`;
 
-const calculateLineDiscountMetrics = (item: Partial<InvoiceItem>) => {
+const calculateLineDiscountMetrics = (item: Partial<InvoiceItem>, product?: Product) => {
+  // MRP is GST-inclusive.
+  // Rate (Ex GST) = MRP ÷ (1 + GST%/100)
+  // Disc(Rs.) = Rate × Disc% / 100 × Qty
+  // Taxable Amt = (Rate × Qty) - Disc(Rs.)
+  // GST TAX = Taxable Amt × GST% / 100
+  // AMOUNT = Taxable Amt + GST TAX
   const quantity = Number(item.quantity) || 0;
-  const sellingPrice = Number(item.sellingPrice) || 0;
+  const gstRate = Number(item.gstRate ?? product?.gstRate ?? 0) || 0;
   const discountPercent = Number(item.discountPercent) || 0;
-  const subtotal = sellingPrice * quantity;
-  const discountAmount = subtotal * (discountPercent / 100);
-  const totalAfterDiscount = subtotal - discountAmount;
+
+  const fixedPrice = Number(item.netPriceApplied || 0);
+  const mrp = fixedPrice > 0
+    ? fixedPrice
+    : Number(product?.sellingPrice ?? (item as any).mrp ?? item.sellingPrice ?? 0) || 0;
+
+  const rate = gstRate > 0 ? mrp / (1 + gstRate / 100) : mrp;
+  const discountAmount = fixedPrice > 0 ? 0 : rate * (discountPercent / 100) * quantity;
+  const taxableAmount = Math.max(0, rate * quantity - discountAmount);
+  const gstTax = taxableAmount * (gstRate / 100);
+  const amount = taxableAmount + gstTax;
 
   return {
-    mrp: sellingPrice,
-    subtotal,
+    mrp,
+    rate,
+    quantity,
     discountPercent,
     discountAmount,
-    totalAfterDiscount,
+    taxableAmount,
+    gstTax,
+    amount,
   };
 };
 
@@ -68,8 +46,8 @@ const calculateDiscountSummary = (items: Partial<InvoiceItem>[]) => {
     if (!item.productId) return summary;
 
     const metrics = calculateLineDiscountMetrics(item);
-    summary.totalDiscountAmount += Number(metrics.discountAmount.toFixed(2));
-    summary.totalBill += Number(metrics.totalAfterDiscount.toFixed(2));
+    summary.totalDiscountAmount += Number((metrics.discountAmount || 0).toFixed(2));
+    summary.totalBill += Number((metrics.amount || 0).toFixed(2));
 
     return summary;
   }, { totalDiscountAmount: 0, totalBill: 0 });
@@ -138,172 +116,69 @@ export function InvoiceGeneratorTab({
   const [invoiceNumber, setInvoiceNumber] = useState('');
   const [invoiceDate, setInvoiceDate] = useState(new Date().toISOString().split('T')[0]);
   const [vehicleNo, setVehicleNo] = useState('');
-  
-  // Customer selection
+  const [customerDiscounts, setCustomerDiscounts] = useState<CustomerDiscount[]>([]);
+  const [customerNetRates, setCustomerNetRates] = useState<CustomerNetRate[]>([]);
+  const [legacyDiscountRules, setLegacyDiscountRules] = useState<CustomerDiscountRule[]>([]);
   const [selectedCustomerId, setSelectedCustomerId] = useState('');
-  const [searchCustomerQuery, setSearchCustomerQuery] = useState('');
-  const [isCustomerDropdownOpen, setIsCustomerDropdownOpen] = useState(false);
-
-  // Quick Add Customer modal inside Invoice generator
-  const [isQuickCustModalOpen, setIsQuickCustModalOpen] = useState(false);
-  const [qcName, setQcName] = useState('');
-  const [qcMobile, setQcMobile] = useState('');
-  const [qcGstin, setQcGstin] = useState('');
-  const [qcState, setQcState] = useState('West Bengal');
-  const [qcRoot, setQcRoot] = useState('');
-  const [qcAddress, setQcAddress] = useState('');
-
-  // Invoice Items
-  const [items, setItems] = useState<Partial<InvoiceItem>[]>([
-    { id: 'item-init-1', productId: '', productName: '', partNumber: '', hsnCode: '', sellingPrice: 0, gstRate: 18, quantity: 1, discountPercent: 0, discountAmount: 0, subtotal: 0, taxAmount: 0, totalAmount: 0 }
-  ]);
-  const [productSearches, setProductSearches] = useState<{[key: string]: string}>({});
-  const [activeDropdownIndex, setActiveDropdownIndex] = useState<number | null>(null);
-
-  const [discountPercent, setDiscountPercent] = useState<number>(0);
-
-  // Initialize Invoice Number on mount or invoices list change, only if NOT in edit mode
-  useEffect(() => {
-    if (!invoiceToEdit) {
-      setInvoiceNumber(generateNextInvoiceNumber());
-    }
-  }, [invoices, invoiceToEdit]);
-
-  // Prefill fields if in Edit Mode
-  useEffect(() => {
-    if (invoiceToEdit) {
-      setInvoiceNumber(invoiceToEdit.invoiceNumber);
-      setInvoiceDate(invoiceToEdit.date);
-      setVehicleNo(invoiceToEdit.vehicleNo || '');
-      setSelectedCustomerId(invoiceToEdit.customerId);
-      setSearchCustomerQuery(invoiceToEdit.customerName);
-      setDiscountPercent(invoiceToEdit.discountPercent || 0);
-
-      const mappedItems = invoiceToEdit.items.map((item, idx) => ({
-        id: item.id || `item-edit-${idx}-${Date.now()}-${Math.random()}`,
-        productId: item.productId,
-        productName: item.productName,
-        partNumber: item.partNumber,
-        hsnCode: item.hsnCode,
-        sellingPrice: item.sellingPrice,
-        gstRate: item.gstRate,
-        quantity: item.quantity,
-        discountPercent: item.discountPercent || 0,
-        discountAmount: item.discountAmount || 0,
-        subtotal: item.subtotal,
-        taxAmount: item.taxAmount,
-        totalAmount: item.totalAmount
-      }));
-      setItems(mappedItems);
-    } else {
-      // Clear/Reset to default state
-      setInvoiceNumber(generateNextInvoiceNumber());
-      setInvoiceDate(new Date().toISOString().split('T')[0]);
-      setVehicleNo('');
-      setSelectedCustomerId('');
-      setSearchCustomerQuery('');
-      setDiscountPercent(0);
-      setItems([
-        { id: 'item-init-1', productId: '', productName: '', partNumber: '', hsnCode: '', sellingPrice: 0, gstRate: 18, quantity: 1, discountPercent: 0, discountAmount: 0, subtotal: 0, taxAmount: 0, totalAmount: 0 }
-      ]);
-    }
-  }, [invoiceToEdit]);
 
   useEffect(() => {
-    if (invoiceToEdit) return;
-
     try {
-      const pendingBarcodes = localStorage.getItem('invoice_scan_pending_items');
-      if (!pendingBarcodes) return;
-
-      const parsedScans = JSON.parse(pendingBarcodes);
-      if (!Array.isArray(parsedScans) || parsedScans.length === 0) return;
-
-      const mappedScans = parsedScans.map((scan: { productId: string; productName: string; partNumber: string; hsnCode: string; sellingPrice: number; gstRate: number; quantity: number; discountPercent?: number }, index: number) => {
-        const sellingPrice = Number(scan.sellingPrice) || 0;
-        const quantity = Number(scan.quantity) || 1;
-        const discountPercent = Number(scan.discountPercent) || 0;
-        const subtotal = sellingPrice * quantity;
-        const discountAmount = subtotal * (discountPercent / 100);
-        const taxAmount = (subtotal - discountAmount) * (Number(scan.gstRate) / 100);
-        const totalAmount = subtotal - discountAmount + taxAmount;
-
-        return {
-          id: `barcode-import-${Date.now()}-${index}`,
-          productId: scan.productId,
-          productName: scan.productName,
-          partNumber: scan.partNumber,
-          hsnCode: scan.hsnCode,
-          sellingPrice,
-          gstRate: Number(scan.gstRate) || 18,
-          quantity,
-          discountPercent,
-          discountAmount,
-          subtotal,
-          taxAmount,
-          totalAmount,
-        };
-      });
-
-      setItems([...mappedScans, {
-        id: `item-init-${Date.now()}`,
-        productId: '',
-        productName: '',
-        partNumber: '',
-        hsnCode: '',
-        sellingPrice: 0,
-        gstRate: 18,
-        quantity: 1,
-        discountPercent: 0,
-        discountAmount: 0,
-        subtotal: 0,
-        taxAmount: 0,
-        totalAmount: 0,
-      }]);
-
-      localStorage.removeItem('invoice_scan_pending_items');
-      showToast(`${mappedScans.length} scanned items loaded into the invoice builder`, 'success');
-    } catch (err) {
-      console.error('Failed to load barcode scans into invoice builder', err);
-    }
-  }, [invoiceToEdit, showToast]);
-
-  // Selected customer object
-  const activeCustomer = customers.find(c => c.id === selectedCustomerId);
-
-  // Dynamic values based on business profiles and customer states
-  const isSameState = activeCustomer ? activeCustomer.state.toLowerCase().trim() === businessProfile.state.toLowerCase().trim() : true;
-
-  // 2. Add New blank Item row
-  const addItemRow = () => {
-    setItems(prev => [
-      ...prev,
-      {
-        id: `item-dyn-${Date.now()}`,
-        productId: '',
-        productName: '',
-        partNumber: '',
-        hsnCode: '',
-        sellingPrice: 0,
-        gstRate: 18,
-        quantity: 1,
-        subtotal: 0,
-        taxAmount: 0,
-        totalAmount: 0
+      const storage = typeof window !== 'undefined' ? window.localStorage : null;
+      const savedRules = storage ? storage.getItem('customer_discount_rules') : null;
+      if (savedRules) {
+        setLegacyDiscountRules(JSON.parse(savedRules));
       }
-    ]);
-  };
+    } catch (err) {
+      console.error('Failed to load customer discount rules', err);
+    }
+  }, []);
 
-  // 3. Remove Item Row
-  const removeItemRow = (index: number) => {
-    if (items.length === 1) {
-      showToast("An invoice must contain at least 1 item", "info");
+  useEffect(() => {
+    if (!selectedCustomerId) {
+      setCustomerDiscounts([]);
+      setCustomerNetRates([]);
       return;
     }
-    setItems(prev => prev.filter((_, idx) => idx !== index));
+
+    (async () => {
+      try {
+        const [discounts, netRates] = await Promise.all([
+          pricingService.fetchCustomerDiscounts(selectedCustomerId),
+          pricingService.fetchCustomerNetRates(selectedCustomerId)
+        ]);
+        setCustomerDiscounts(discounts);
+        setCustomerNetRates(netRates);
+      } catch (err) {
+        console.error('Failed to load customer pricing rules', err);
+        setCustomerDiscounts([]);
+        setCustomerNetRates([]);
+      }
+    })();
+  }, [selectedCustomerId]);
+
+  useEffect(() => {
+    if (products.length > 0) return;
+
+    try {
+      const storage = typeof window !== 'undefined' ? window.localStorage : null;
+      const savedProducts = storage ? storage.getItem('invoice_products') : null;
+      if (!savedProducts) return;
+
+      const parsedProducts = JSON.parse(savedProducts);
+      if (Array.isArray(parsedProducts) && parsedProducts.length > 0) {
+        setProducts(parsedProducts);
+      }
+    } catch (err) {
+      console.error('Failed to load products for invoice builder', err);
+    }
+  }, [products.length, setProducts]);
+
+  const getCustomerNetPrice = (customerId: string | undefined, productId: string) => {
+    if (!customerId) return null;
+    const rule = customerNetRates.find(r => r.productId === productId);
+    return rule ? rule.netRate : null;
   };
 
-  // Helper to fetch custom discount percentage for a customer and product brand or SKU
   const getStickyDiscount = (prod: Product, targetCustomerId?: string): number => {
     if (prod.isNetProduct) return 0;
     const custId = targetCustomerId || selectedCustomerId;
@@ -312,61 +187,72 @@ export function InvoiceGeneratorTab({
     const fixedPrice = getCustomerNetPrice(custId, prod.id);
     if (fixedPrice !== null) return 0;
 
-    // 1. Try new memory tables linked directly to Customer ID in localStorage
-    try {
-      const savedMemo = localStorage.getItem(`customer_discounts_${custId}`);
-      if (savedMemo) {
-        const data = JSON.parse(savedMemo);
-        if (data) {
-          // Check product-wise discount (Product name is linked via productId in our new setup)
-          const prodRule = data.products?.find((p: any) => p.productId === prod.id);
-          if (prodRule) {
-            return prodRule.discountPercent;
-          }
-          // Check brand-wise discount
-          if (prod.brand) {
-            const brandRule = data.brands?.find((b: any) => b.brandName.toLowerCase().trim() === prod.brand.toLowerCase().trim());
-            if (brandRule) {
-              return brandRule.discountPercent;
-            }
-          }
-        }
-      }
-    } catch (e) {
-      console.error("Error reading new customer discounts memory:", e);
-    }
+    if (customerDiscounts.length > 0) {
+      const prodRule = customerDiscounts.find(d => d.type === 'PRODUCT' && d.target === prod.id);
+      if (prodRule) return prodRule.discountPercent;
 
-    // 2. Legacy / Custom discount rules fallback
-    try {
-      const savedRulesStr = localStorage.getItem('customer_discount_rules');
-      if (!savedRulesStr) return 0;
-      const rules: CustomerDiscountRule[] = JSON.parse(savedRulesStr);
-      
-      // Look for custom rules for this customer
-      const custRules = rules.filter(r => r.customerId === custId);
-      if (custRules.length === 0) return 0;
-
-      // 1st Priority: SKU specific rule
-      const skuRule = custRules.find(r => r.type === 'SKU' && r.value === prod.id);
-      if (skuRule) return skuRule.discountPercent;
-
-      // 2nd Priority: Brand specific rule
       if (prod.brand) {
-        const brandRule = custRules.find(r => r.type === 'Brand' && r.value.toLowerCase().trim() === prod.brand.toLowerCase().trim());
+        const brandRule = customerDiscounts.find(d => d.type === 'BRAND' && d.target.toLowerCase().trim() === prod.brand.toLowerCase().trim());
         if (brandRule) return brandRule.discountPercent;
       }
-
-      // 3rd Priority: Flat customer discount rule
-      const flatRule = custRules.find(r => r.type === 'Flat');
-      if (flatRule) return flatRule.discountPercent;
-
-    } catch (e) {
-      console.error(e);
     }
+
+    if (legacyDiscountRules?.length) {
+      // ... same legacy logic
+      try {
+        const rules = legacyDiscountRules;
+        const custRules = rules.filter(r => r.customerId === custId);
+        if (custRules.length === 0) return 0;
+
+        const skuRule = custRules.find(r => r.type === 'SKU' && r.value === prod.id);
+        if (skuRule) return skuRule.discountPercent;
+
+        if (prod.brand) {
+          const brandRule = custRules.find(r => r.type === 'Brand' && r.value.toLowerCase().trim() === prod.brand.toLowerCase().trim());
+          if (brandRule) return brandRule.discountPercent;
+        }
+
+        const flatRule = custRules.find(r => r.type === 'Flat');
+        if (flatRule) return flatRule.discountPercent;
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
     return 0;
   };
 
-  // Trigger pricing recalculation when customer selection or product catalog changes
+  const applyCustomerPricing = (item: InvoiceItem, product: Product | undefined, customerId: string | undefined) => {
+    const fixedPrice = product ? getCustomerNetPrice(customerId, product.id) : null;
+    const effectiveMrp = fixedPrice ?? product?.sellingPrice ?? item.sellingPrice ?? 0;
+    const quantity = item.quantity || 1;
+    const gstRate = Number(item.gstRate ?? product?.gstRate ?? 0) || 0;
+    const isNetPriceApplied = fixedPrice !== null;
+    
+    // Auto-apply sticky discount if item.discountPercent is 0 or undefined
+    let lineDiscountPercent = isNetPriceApplied ? 0 : (item.discountPercent || 0);
+    if (!isNetPriceApplied && lineDiscountPercent === 0 && product) {
+      lineDiscountPercent = getStickyDiscount(product, customerId);
+    }
+
+    const rate = gstRate > 0 ? effectiveMrp / (1 + gstRate / 100) : effectiveMrp;
+    const subtotal = rate * quantity;
+    const discountAmount = lineDiscountPercent > 0 ? rate * (lineDiscountPercent / 100) * quantity : 0;
+    const taxableAmount = Math.max(0, subtotal - discountAmount);
+    const taxAmount = taxableAmount * (gstRate / 100);
+    const totalAmount = taxableAmount + taxAmount;
+
+    return {
+      sellingPrice: effectiveMrp,
+      discountPercent: lineDiscountPercent,
+      discountAmount,
+      netPriceApplied: isNetPriceApplied ? effectiveMrp : undefined,
+      subtotal,
+      taxAmount,
+      totalAmount,
+    };
+  };
+
   useEffect(() => {
     setItems(prev => prev.map(item => {
       if (!item.productId) return item;
@@ -378,31 +264,21 @@ export function InvoiceGeneratorTab({
         ...applyCustomerPricing(item, prod, selectedCustomerId),
       };
     }));
-  }, [selectedCustomerId, products]);
+  }, [selectedCustomerId, products, customerDiscounts, customerNetRates]);
 
   // 4. Update row values on product selection or custom inputs
   const handleItemProductSelect = (index: number, productId: string) => {
     const prod = products.find(p => p.id === productId);
     if (!prod) return;
 
-    const oldQty = invoiceToEdit
-      ? (invoiceToEdit.items.find(it => it.productId === productId)?.quantity || 0)
-      : 0;
-    const currentAvailable = prod.currentStock + oldQty;
-
-    if (currentAvailable === 0) {
-      showToast(`Warning: '${prod.name}' is currently of Out of Stock in warehouse`, "error");
-    }
+    setProductSearches(prev => ({ ...prev, [items[index]?.id || `item-${index}`]: prod.name }));
+    setActiveDropdownIndex(null);
 
     setItems(prev => prev.map((item, idx) => {
       if (idx !== index) return item;
 
       const quantity = item.quantity || 1;
-      const finalQty = quantity > currentAvailable ? currentAvailable : quantity;
-
-      if (quantity > currentAvailable) {
-        showToast(`Capped quantity at ${currentAvailable} due to warehouse availability limit`, "info");
-      }
+      const finalQty = quantity;
 
       const stickyPercent = getStickyDiscount(prod);
       if (stickyPercent > 0) {
@@ -446,21 +322,12 @@ export function InvoiceGeneratorTab({
     }));
   };
 
-  const handleQtyChange = (index: number, qty: number) => {
-    setItems(prev => prev.map((item, idx) => {
-      if (idx !== index) return item;
+  const handleQtyChange = (itemId: string, qty: number) => {
+    setItems(prev => prev.map((item) => {
+      if (item.id !== itemId) return item;
 
       const prod = products.find(p => p.id === item.productId);
-      const oldQty = invoiceToEdit
-        ? (invoiceToEdit.items.find(it => it.productId === item.productId)?.quantity || 0)
-        : 0;
-      const availableStock = prod ? (prod.currentStock + oldQty) : 99999;
-      
-      let finalQty = qty;
-      if (qty > availableStock) {
-        showToast(`Stock limit: Only ${availableStock} units available for this product`, "error");
-        finalQty = availableStock;
-      }
+      const finalQty = Math.max(0, qty);
 
       const pricing = applyCustomerPricing({
         ...item,
@@ -492,23 +359,25 @@ export function InvoiceGeneratorTab({
       const prod = products.find(p => p.id === item.productId);
       const qty = item.quantity || 1;
       const fixedPrice = prod ? getCustomerNetPrice(selectedCustomerId, prod.id) : null;
-      const effectivePrice = fixedPrice !== null ? fixedPrice : price;
-      const subtotal = effectivePrice * qty;
-      const discPercent = fixedPrice !== null ? 0 : (item.discountPercent || 0);
-      const discountAmount = subtotal * (discPercent / 100);
+      const effectiveMrp = fixedPrice !== null ? fixedPrice : price;
       const gst = item.gstRate || 0;
-      const taxAmount = (subtotal - discountAmount) * (gst / 100);
-      const totalAmount = subtotal - discountAmount + taxAmount;
+      const rate = gst > 0 ? effectiveMrp / (1 + gst / 100) : effectiveMrp;
+      const subtotal = rate * qty;
+      const discPercent = fixedPrice !== null ? 0 : (item.discountPercent || 0);
+      const discountAmount = discPercent > 0 ? rate * (discPercent / 100) * qty : 0;
+      const taxableAmount = Math.max(0, subtotal - discountAmount);
+      const taxAmount = taxableAmount * (gst / 100);
+      const totalAmount = taxableAmount + taxAmount;
 
       return {
         ...item,
-        sellingPrice: effectivePrice,
+        sellingPrice: effectiveMrp,
         discountPercent: discPercent,
         discountAmount,
         subtotal,
         taxAmount,
         totalAmount,
-        netPriceApplied: fixedPrice !== null ? effectivePrice : undefined,
+        netPriceApplied: fixedPrice !== null ? effectiveMrp : undefined,
       };
     }));
   };
@@ -526,13 +395,15 @@ export function InvoiceGeneratorTab({
         showToast(`Discount not allowed: '${prod?.name || 'Product'}' is protected from discounts by fixed net pricing.`, "error");
       }
 
-      const price = item.sellingPrice || 0;
+      const effectiveMrp = item.sellingPrice || 0;
       const qty = item.quantity || 1;
-      const subtotal = price * qty;
-      const discountAmount = subtotal * (appliedDisc / 100);
       const gst = item.gstRate || 0;
-      const taxAmount = (subtotal - discountAmount) * (gst / 100);
-      const totalAmount = subtotal - discountAmount + taxAmount;
+      const rate = gst > 0 ? effectiveMrp / (1 + gst / 100) : effectiveMrp;
+      const subtotal = rate * qty;
+      const discountAmount = appliedDisc > 0 ? rate * (appliedDisc / 100) * qty : 0;
+      const taxableAmount = Math.max(0, subtotal - discountAmount);
+      const taxAmount = taxableAmount * (gst / 100);
+      const totalAmount = taxableAmount + taxAmount;
 
       return {
         ...item,
@@ -550,17 +421,20 @@ export function InvoiceGeneratorTab({
     setItems(prev => prev.map((item, idx) => {
       if (idx !== index) return item;
 
-      const price = item.sellingPrice || 0;
+      const effectiveMrp = item.sellingPrice || 0;
       const qty = item.quantity || 1;
-      const subtotal = price * qty;
-      const discPercent = item.discountPercent || 0;
-      const discountAmount = subtotal * (discPercent / 100);
-      const taxAmount = (subtotal - discountAmount) * (rate / 100);
-      const totalAmount = subtotal - discountAmount + taxAmount;
+      const rateExGst = rate > 0 ? effectiveMrp / (1 + rate / 100) : effectiveMrp;
+      const subtotal = rateExGst * qty;
+      const discountAmount = (item.discountPercent || 0) > 0 ? rateExGst * ((item.discountPercent || 0) / 100) * qty : 0;
+      const taxableAmount = Math.max(0, subtotal - discountAmount);
+      const taxAmount = taxableAmount * (rate / 100);
+      const totalAmount = taxableAmount + taxAmount;
 
       return {
         ...item,
         gstRate: rate,
+        subtotal,
+        discountAmount,
         taxAmount,
         totalAmount
       };
@@ -569,29 +443,10 @@ export function InvoiceGeneratorTab({
 
   // 5. Calculations on total
   const calculateInvoiceTotals = () => {
-    let rawSubtotal = 0;
+    // Compute per-line metrics and aggregate
+    let totalLineBase = 0;
     let itemDiscountsSum = 0;
-    let nonNetRemainingBase = 0;
-
-    items.forEach(item => {
-      if (!item.productId) return;
-      rawSubtotal += item.subtotal || 0;
-      itemDiscountsSum += item.discountAmount || 0;
-
-      const prod = products.find(p => p.id === item.productId);
-      const fixedPrice = prod ? getCustomerNetPrice(selectedCustomerId, prod.id) : null;
-      const isProtectedNetRow = Boolean(prod && (prod.isNetProduct || fixedPrice !== null || item.netPriceApplied));
-
-      if (!isProtectedNetRow) {
-        const rowSubtotal = item.subtotal || 0;
-        const rowItemDiscount = item.discountAmount || 0;
-        nonNetRemainingBase += (rowSubtotal - rowItemDiscount);
-      }
-    });
-
-    const remainingBase = rawSubtotal - itemDiscountsSum;
-    const mainInvoiceDiscountAmt = nonNetRemainingBase * (discountPercent / 100);
-    const totalDiscountAmount = itemDiscountsSum + mainInvoiceDiscountAmt;
+    let taxableBaseAfterLineDiscount = 0;
 
     let calculatedCgst = 0;
     let calculatedSgst = 0;
@@ -600,38 +455,46 @@ export function InvoiceGeneratorTab({
 
     items.forEach(item => {
       if (!item.productId) return;
-      const rowSubtotal = item.subtotal || 0;
-      const rowItemDiscount = item.discountAmount || 0;
-      const baseAfterRowDiscount = rowSubtotal - rowItemDiscount;
-      
       const prod = products.find(p => p.id === item.productId);
-      const fixedPrice = prod ? getCustomerNetPrice(selectedCustomerId, prod.id) : null;
-      const isNet = Boolean(prod && (prod.isNetProduct || fixedPrice !== null || item.netPriceApplied));
+      const metrics = calculateLineDiscountMetrics(item, prod);
 
-      const shareOfMainDiscount = (!isNet && nonNetRemainingBase > 0) ? (baseAfterRowDiscount / nonNetRemainingBase) * mainInvoiceDiscountAmt : 0;
-      const finalRowGstBase = baseAfterRowDiscount - shareOfMainDiscount;
-      
-      const itemTaxVal = finalRowGstBase * ((item.gstRate || 18) / 100);
-
-      finalTaxSum += itemTaxVal;
+      totalLineBase += (metrics.rate || 0) * (metrics.quantity || 0);
+      itemDiscountsSum += (metrics.discountAmount || 0);
+      taxableBaseAfterLineDiscount += (metrics.taxableAmount || 0);
+      finalTaxSum += (metrics.gstTax || 0);
 
       if (isSameState) {
-        calculatedCgst += itemTaxVal / 2;
-        calculatedSgst += itemTaxVal / 2;
+        calculatedCgst += (metrics.gstTax || 0) / 2;
+        calculatedSgst += (metrics.gstTax || 0) / 2;
       } else {
-        calculatedIgst += itemTaxVal;
+        calculatedIgst += (metrics.gstTax || 0);
       }
     });
 
-    const totalBill = rawSubtotal - totalDiscountAmount + finalTaxSum;
+    const invoiceLevelDiscountAmt = taxableBaseAfterLineDiscount * (discountPercent / 100);
+    const totalDiscountAmount = itemDiscountsSum + invoiceLevelDiscountAmt;
+
+    const taxableAfterInvoiceDiscount = Math.max(0, taxableBaseAfterLineDiscount - invoiceLevelDiscountAmt);
+    const roundTaxRatio = taxableAfterInvoiceDiscount > 0 ? taxableAfterInvoiceDiscount / Math.max(1, taxableBaseAfterLineDiscount) : 0;
+
+    const finalTaxAfterInvoiceDiscount = finalTaxSum * roundTaxRatio;
+    let cgstAfter = 0, sgstAfter = 0, igstAfter = 0;
+    if (isSameState) {
+      cgstAfter = finalTaxAfterInvoiceDiscount / 2;
+      sgstAfter = finalTaxAfterInvoiceDiscount / 2;
+    } else {
+      igstAfter = finalTaxAfterInvoiceDiscount;
+    }
+
+    const totalBill = taxableAfterInvoiceDiscount + finalTaxAfterInvoiceDiscount;
 
     return {
-      subtotal: rawSubtotal,
+      subtotal: totalLineBase,
       discountAmount: totalDiscountAmount,
-      taxAmount: finalTaxSum,
-      cgstAmount: calculatedCgst,
-      sgstAmount: calculatedSgst,
-      igstAmount: calculatedIgst,
+      taxAmount: finalTaxAfterInvoiceDiscount,
+      cgstAmount: cgstAfter,
+      sgstAmount: sgstAfter,
+      igstAmount: igstAfter,
       totalAmount: totalBill
     };
   };
@@ -640,7 +503,7 @@ export function InvoiceGeneratorTab({
   const discountSummary = calculateDiscountSummary(items);
 
   // 6. Submit and Save Invoice (Supports Create or Edit)
-  const handleSaveInvoice = (e: FormEvent) => {
+  const handleSaveInvoice = async (e: FormEvent) => {
     e.preventDefault();
 
     if (!selectedCustomerId) {
@@ -655,7 +518,6 @@ export function InvoiceGeneratorTab({
       return;
     }
 
-    // Check stock for all items
     // First, map the old quantities if we are in Edit Mode
     const oldQuantitiesMap: { [productId: string]: number } = {};
     if (invoiceToEdit) {
@@ -663,21 +525,6 @@ export function InvoiceGeneratorTab({
         oldQuantitiesMap[item.productId] = (oldQuantitiesMap[item.productId] || 0) + item.quantity;
       });
     }
-
-    let hasStockError = false;
-    validItems.forEach(item => {
-      const prod = products.find(p => p.id === item.productId);
-      if (!prod) return;
-      const oldQty = oldQuantitiesMap[item.productId] || 0;
-      const newQty = item.quantity || 0;
-      const tempStock = prod.currentStock + oldQty - newQty;
-      if (tempStock < 0) {
-        showToast(`Stock limit: Only ${prod.currentStock + oldQty} units of '${prod.name}' can be billed. Needed: ${newQty}`, "error");
-        hasStockError = true;
-      }
-    });
-
-    if (hasStockError) return;
 
     // Adjust/Deduct stock of items in database
     // "FIRST: Restore old stock for all old products (add back the old quantities)"
@@ -695,11 +542,13 @@ export function InvoiceGeneratorTab({
       return p;
     }));
 
+    let nextInvoices: Invoice[] = invoices;
+
     if (invoiceToEdit) {
       // Update existing invoice (preserve same ID and invoiceNumber)
       const updatedInvoice: Invoice = {
         ...invoiceToEdit,
-        invoiceNumber, // in case user is allowed to edit or it stays same
+        invoiceNumber,
         date: invoiceDate,
         customerId: selectedCustomerId,
         customerName: activeCustomer!.name,
@@ -736,12 +585,19 @@ export function InvoiceGeneratorTab({
         status: invoiceToEdit.status || 'Paid'
       };
 
-      setInvoices(prev => prev.map(inv => inv.id === invoiceToEdit.id ? updatedInvoice : inv));
+      nextInvoices = invoices.map(inv => inv.id === invoiceToEdit.id ? updatedInvoice : inv);
+      setInvoices(nextInvoices);
       showToast("Invoice updated successfully", "success");
-      
-      // Reset edit state
+
       if (setInvoiceToEdit) {
         setInvoiceToEdit(null);
+      }
+
+      try {
+        await supabase.saveInvoice(updatedInvoice);
+      } catch (err) {
+        console.error('Failed to persist invoice to Supabase', err);
+        showToast('Invoice saved locally, but Supabase persist failed.', 'error');
       }
     } else {
       // Create Invoice structure
@@ -751,6 +607,7 @@ export function InvoiceGeneratorTab({
         date: invoiceDate,
         customerId: selectedCustomerId,
         customerName: activeCustomer!.name,
+        customerEmail: '',
         customerMobile: activeCustomer!.mobile,
         customerGstin: activeCustomer!.gstin,
         customerAddress: activeCustomer!.address,
@@ -784,12 +641,20 @@ export function InvoiceGeneratorTab({
         status: 'Paid'
       };
 
-      setInvoices(prev => [nextInvoice, ...prev]);
+      nextInvoices = [nextInvoice, ...invoices];
+      setInvoices(nextInvoices);
       showToast(`Invoice ${invoiceNumber} generated & saved successfully!`, "success");
+
+      try {
+        await supabase.saveInvoice(nextInvoice);
+      } catch (err) {
+        console.error('Failed to persist invoice to Supabase', err);
+        showToast('Invoice saved locally, but Supabase persist failed.', 'error');
+      }
     }
 
     // Clear Form & Redirect to Invoice list
-    setItems([{ id: 'item-init-1', productId: '', productName: '', partNumber: '', hsnCode: '', sellingPrice: 0, gstRate: 18, quantity: 1, discountPercent: 0, discountAmount: 0, subtotal: 0, taxAmount: 0, totalAmount: 0 }]);
+    setItems([{ id: 'item-init-1', productId: '', productName: '', partNumber: '', hsnCode: '', sellingPrice: 0, gstRate: 18, quantity: 0, discountPercent: 0, discountAmount: 0, subtotal: 0, taxAmount: 0, totalAmount: 0 }]);
     setSelectedCustomerId('');
     setSearchCustomerQuery('');
     setDiscountPercent(0);
@@ -844,7 +709,7 @@ export function InvoiceGeneratorTab({
           Professional GST Invoice Builder
         </h1>
         <p className="text-slate-500 dark:text-slate-400 text-sm mt-1">
-          Draft tax compliance invoices with real-time stock validations, State tax routing, and auto rounding.
+          Draft tax compliance invoices with smart totals, State tax routing, and auto rounding.
         </p>
       </div>
 
@@ -1057,146 +922,81 @@ export function InvoiceGeneratorTab({
             </span>
           </div>
 
-          <table className="w-full text-left min-w-[900px]">
+          <table className="w-full text-left min-w-[1100px]">
             <thead>
               <tr className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider border-b border-slate-100 dark:border-slate-800 pb-2">
-                <th className="py-2.5 w-1/3">Product Info</th>
-                <th className="py-2.5 px-2 w-24">HSN Code</th>
-                <th className="py-2.5 px-2 w-24">Stock Avail</th>
+                <th className="py-2.5 w-10">Sr No</th>
+                <th className="py-2.5 px-2 w-28">Part No</th>
+                <th className="py-2.5 w-1/3">Description</th>
+                <th className="py-2.5 px-2 w-24">HSN No</th>
                 <th className="py-2.5 px-2 w-28">MRP</th>
-                <th className="py-2.5 px-2 w-28">Rate (Ex. GST)</th>
+                <th className="py-2.5 px-2 w-28">Rate</th>
                 <th className="py-2.5 px-2 w-16">Qty</th>
-                <th className="py-2.5 px-2 w-24">Discount %</th>
-                <th className="py-2.5 px-2 w-28">Discount Amount (₱)</th>
-                <th className="py-2.5 px-2 w-28">GST% Rate</th>
-                <th className="py-2.5 px-2 w-28 text-right">Total (After Discount)</th>
-                <th className="py-2.5 px-2 text-right">Row Net Amt</th>
+                <th className="py-2.5 px-2 w-20">Disc%</th>
+                <th className="py-2.5 px-2 w-28">Disc (Rs.)</th>
+                <th className="py-2.5 px-2 w-32">Taxable Amt</th>
+                <th className="py-2.5 px-2 w-20">GST%</th>
+                <th className="py-2.5 px-2 w-28">GST TAX</th>
+                <th className="py-2.5 px-2 text-right">AMOUNT</th>
                 <th className="py-2.5 w-12 text-center"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-50 dark:divide-slate-850">
               {items.map((item, index) => {
                 const productSpec = products.find(p => p.id === item.productId);
-                const maxVal = productSpec ? productSpec.currentStock : 9999;
-                const lineMetrics = calculateLineDiscountMetrics(item);
+                const lineMetrics = calculateLineDiscountMetrics(item, productSpec);
 
                 return (
                   <tr key={item.id} className="align-middle">
-                    {/* Product Selector */}
-                    <td className="py-3 pr-2 relative">
+                    <td className="py-3 px-2 text-xs text-slate-600">{index + 1}</td>
+
+                    {/* Part No */}
+                    <td className="py-3 px-2 text-xs font-mono text-slate-600">{productSpec?.partNumber || item.partNumber || '-'}</td>
+
+                    {/* Description */}
+                    <td className="py-3 pr-2 relative text-sm">
                       <div className="relative">
                         <input
                           type="text"
-                          required
-                          placeholder="Search SKU title, SKU Part No or category..."
-                          value={productSearches[item.id!] !== undefined ? productSearches[item.id!] : (productSpec ? `${productSpec.name} (${productSpec.partNumber})` : '')}
-                          onFocus={() => {
-                            setActiveDropdownIndex(index);
-                            if (productSearches[item.id!] === undefined) {
-                              setProductSearches(prev => ({ ...prev, [item.id!]: productSpec ? productSpec.name : '' }));
-                            }
-                          }}
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            setProductSearches(prev => ({ ...prev, [item.id!]: val }));
-                            setActiveDropdownIndex(index);
-                          }}
-                          onBlur={() => {
-                            // Delay closure slightly so that onMouseDown clicks can register successfully first
-                            setTimeout(() => {
-                              setActiveDropdownIndex(null);
-                            }, 250);
-                          }}
-                          className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-950 border border-slate-150 dark:border-slate-850 rounded-xl text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:text-slate-200"
+                          value={productSearches[item.id] ?? item.productName ?? ''}
+                          onChange={(e) => handleProductSearchInput(item.id, index, e.target.value)}
+                          onFocus={() => setActiveDropdownIndex(index)}
+                          placeholder="Search product name, part no or brand..."
+                          className="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                         />
-                        {productSpec && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              // Reset option/selection
-                              setItems(prev => prev.map((itemObj, itIdx) => itIdx === index ? { ...itemObj, productId: '', productName: '', partNumber: '', hsnCode: '', sellingPrice: 0, gstRate: 18, quantity: 1, discountPercent: 0, discountAmount: 0, subtotal: 0, taxAmount: 0, totalAmount: 0 } : itemObj));
-                              setProductSearches(prev => ({ ...prev, [item.id!]: '' }));
-                            }}
-                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-sm font-black p-0.5 cursor-pointer"
-                            title="Clear SKU item selection"
-                          >
-                            ×
-                          </button>
+                        {activeDropdownIndex === index && (
+                          <div className="absolute left-0 right-0 z-20 mt-1 max-h-56 overflow-y-auto rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-xl">
+                            {getProductSearchOptions(productSearches[item.id] ?? item.productName ?? '').map((product) => (
+                              <button
+                                key={product.id}
+                                type="button"
+                                onClick={() => handleItemProductSelect(index, product.id)}
+                                className="w-full text-left px-3 py-3 border-b border-slate-100 dark:border-slate-800 last:border-0 hover:bg-slate-50 dark:hover:bg-slate-950"
+                              >
+                                <div className="text-xs font-semibold text-slate-900 dark:text-slate-100">{product.name}</div>
+                                <div className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">
+                                  {product.partNumber || 'No part no'} • ₹{product.sellingPrice.toFixed(2)} • GST {product.gstRate}%
+                                </div>
+                              </button>
+                            ))}
+                            {getProductSearchOptions(productSearches[item.id] ?? item.productName ?? '').length === 0 && (
+                              <div className="px-3 py-3 text-xs text-slate-500">No matching products found.</div>
+                            )}
+                          </div>
                         )}
                       </div>
-
-                      {activeDropdownIndex === index && (
-                        <div className="absolute left-0 right-0 mt-1 bg-white dark:bg-slate-900 border border-slate-150 dark:border-slate-800 max-h-56 overflow-y-auto rounded-xl shadow-lg z-30 divide-y divide-slate-50 dark:divide-slate-850">
-                          {(() => {
-                            const query = productSearches[item.id!] || '';
-                            const lQuery = query.toLowerCase().trim();
-                            const filtered = products.filter(p => {
-                              if (!lQuery) return true;
-                              return (
-                                p.name?.toLowerCase().includes(lQuery) ||
-                                p.partNumber?.toLowerCase().includes(lQuery) ||
-                                p.brand?.toLowerCase().includes(lQuery) ||
-                                p.category?.toLowerCase().includes(lQuery) ||
-                                p.hsnCode?.toLowerCase().includes(lQuery)
-                              );
-                            }).slice(0, 10);
-
-                            if (filtered.length === 0) {
-                              return <div className="p-3 text-center text-xs text-slate-450">No catalog products match search query</div>;
-                            }
-
-                            return filtered.map(p => (
-                              <div
-                                key={p.id}
-                                onMouseDown={() => {
-                                  handleItemProductSelect(index, p.id);
-                                  setProductSearches(prev => ({ ...prev, [item.id!]: `${p.name} (${p.partNumber})` }));
-                                  setActiveDropdownIndex(null);
-                                }}
-                                className="p-2.5 hover:bg-slate-50 dark:hover:bg-slate-955 cursor-pointer text-left transition-colors"
-                              >
-                                <div className="text-xs font-bold text-slate-850 dark:text-slate-200 flex items-center justify-between">
-                                  <span>{p.name}</span>
-                                  {p.isNetProduct && (
-                                    <span className="px-1 text-[8px] bg-amber-100 dark:bg-amber-955 text-amber-700 dark:text-amber-400 rounded border border-amber-200 dark:border-amber-900/30 font-extrabold tracking-wider">
-                                      NET SKU
-                                    </span>
-                                  )}
-                                </div>
-                                <div className="text-[10px] text-slate-400 font-mono mt-0.5">
-                                  Part No: {p.partNumber} | HSN: {p.hsnCode || "N/A"} | Stock: {p.currentStock} Units | Price: ₹{p.sellingPrice}
-                                </div>
-                              </div>
-                            ));
-                          })()}
-                        </div>
-                      )}
+                      <div className="mt-2 text-[10px] text-slate-500 dark:text-slate-400">
+                        {productSpec ? `${productSpec.partNumber || 'N/A'} • ₹${productSpec.sellingPrice.toFixed(2)} • GST ${productSpec.gstRate}%` : 'Select a product to populate item details.'}
+                      </div>
                     </td>
 
-                    {/* HSN Code display */}
-                    <td className="py-3 px-2">
-                      <span className="font-mono text-xs text-slate-500 dark:text-slate-400">
-                        {item.hsnCode || "-"}
-                      </span>
-                    </td>
-
-                    {/* Available Stock Display */}
-                    <td className="py-3 px-2">
-                      {productSpec ? (
-                        <span className={`text-xs font-bold font-mono ${productSpec.currentStock <= 5 ? 'text-rose-500' : 'text-emerald-500'}`}>
-                          {productSpec.currentStock} Units
-                        </span>
-                      ) : (
-                        <span className="text-slate-300">-</span>
-                      )}
-                    </td>
+                    {/* HSN */}
+                    <td className="py-3 px-2 text-xs font-mono text-slate-500">{item.hsnCode || productSpec?.hsnCode || '-'}</td>
 
                     {/* MRP */}
-                    <td className="py-3 px-2 text-right font-mono text-xs dark:text-slate-100">
-                      ₹{lineMetrics.mrp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                    </td>
+                    <td className="py-3 px-2 text-right font-mono text-xs">₹{lineMetrics.mrp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
 
-                    {/* Custom Pricing */}
+                    {/* Rate (editable) */}
                     <td className="py-3 px-2">
                       <div className="relative">
                         <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[10px] text-slate-400 font-bold">₹</span>
@@ -1211,63 +1011,55 @@ export function InvoiceGeneratorTab({
                       </div>
                     </td>
 
-                    {/* Quantity Field */}
+                    {/* Qty */}
                     <td className="py-3 px-2">
                       <input
                         type="number"
-                        required
-                        min={1}
-                        max={maxVal}
-                        value={item.quantity || 1}
-                        onChange={(e) => handleQtyChange(index, Number(e.target.value))}
-                        className="w-full px-2.5 py-1.5 bg-slate-50 dark:bg-slate-950 border border-slate-150 dark:border-slate-850 rounded-xl text-xs font-mono text-center focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:text-slate-200"
+                        inputMode="decimal"
+                        step="any"
+                        value={item.quantity || ''}
+                        onChange={(e) => handleQtyChange(item.id, Number(e.target.value))}
+                        style={{
+                          width: '70px',
+                          padding: '6px',
+                          textAlign: 'center',
+                          border: '1px solid #d1d5db',
+                          borderRadius: '8px',
+                          appearance: 'textfield',
+                          MozAppearance: 'textfield',
+                          WebkitAppearance: 'none'
+                        }}
+                        className="focus:outline-none"
                       />
                     </td>
 
-                    {/* Discount % Field */}
-                    <td className="py-3 px-2">
-                      <div className="relative">
-                        <input
-                          type="number"
-                          required
-                          min={0}
-                          max={100}
-                          value={item.discountPercent || 0}
-                          onChange={(e) => handleItemDiscountPercentChange(index, Number(e.target.value))}
-                          className="w-full pl-2 pr-5 py-1.5 bg-slate-50 dark:bg-slate-950 border border-slate-150 dark:border-slate-850 rounded-xl text-xs font-mono text-center focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:text-slate-100"
-                        />
-                        <span className="absolute right-1 top-1/2 -translate-y-1/2 text-[9px] text-slate-400 font-bold">%</span>
-                      </div>
+                    {/* Disc% */}
+                    <td className="py-3 px-2 text-center">
+                      <input
+                        type="number"
+                        required
+                        min={0}
+                        max={100}
+                        value={item.discountPercent || 0}
+                        onChange={(e) => handleItemDiscountPercentChange(index, Number(e.target.value))}
+                        className="w-full pl-2 pr-2 py-1.5 bg-slate-50 dark:bg-slate-950 border border-slate-150 dark:border-slate-850 rounded-xl text-xs font-mono text-center focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:text-slate-100"
+                      />
                     </td>
 
-                    {/* Discount Amount (₱) */}
-                    <td className="py-3 px-2 text-right font-mono text-xs dark:text-slate-100">
-                      ₹{lineMetrics.discountAmount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                    </td>
+                    {/* Disc(Rs.) */}
+                    <td className="py-3 px-2 text-right font-mono text-xs">₹{(lineMetrics.discountAmount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
 
-                    {/* Custom GST Selection */}
-                    <td className="py-3 px-2">
-                      <select
-                        value={item.gstRate || 18}
-                        onChange={(e) => handleGstRateChange(index, Number(e.target.value))}
-                        className="w-full px-2 py-1.5 bg-slate-50 dark:bg-slate-950 border border-slate-150 dark:border-slate-850 rounded-xl text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:text-slate-250"
-                      >
-                        <option value={5}>5%</option>
-                        <option value={12}>12%</option>
-                        <option value={18}>18%</option>
-                        <option value={28}>28%</option>
-                      </select>
-                    </td>
+                    {/* Taxable Amt */}
+                    <td className="py-3 px-2 text-right font-mono text-xs">₹{(lineMetrics.taxableAmount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
 
-                    {/* Total (After Discount) */}
-                    <td className="py-3 px-2 text-right font-semibold font-mono text-xs dark:text-slate-100">
-                      ₹{lineMetrics.totalAfterDiscount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                    </td>
+                    {/* GST% */}
+                    <td className="py-3 px-2 text-center text-xs">{item.gstRate || productSpec?.gstRate || 0}%</td>
 
-                    {/* Total Row net cost */}
-                    <td className="py-3 px-2 text-right font-semibold font-mono text-xs dark:text-slate-100">
-                      ₹{((item.totalAmount || 0)).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                    </td>
+                    {/* GST TAX */}
+                    <td className="py-3 px-2 text-right font-mono text-xs">₹{(lineMetrics.gstTax || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+
+                    {/* AMOUNT */}
+                    <td className="py-3 px-2 text-right font-semibold font-mono text-xs">₹{(lineMetrics.amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
 
                     {/* Delete action */}
                     <td className="py-3 pl-2 text-center">
@@ -1300,7 +1092,7 @@ export function InvoiceGeneratorTab({
             <div className="rounded-2xl border border-emerald-200/60 dark:border-emerald-900/40 bg-emerald-50/70 dark:bg-emerald-950/20 px-4 py-3 flex items-center justify-between gap-3">
               <div>
                 <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-700 dark:text-emerald-300">Total Bill</div>
-                <div className="text-xs text-slate-500 dark:text-slate-300">Sum of discounted line totals before tax</div>
+                <div className="text-xs text-slate-500 dark:text-slate-300">Sum of discounted line totals including GST</div>
               </div>
               <div className="font-mono text-lg font-bold text-emerald-700 dark:text-emerald-300">
                 ₹{discountSummary.totalBill.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
@@ -1347,11 +1139,8 @@ export function InvoiceGeneratorTab({
               </div>
             </div>
 
-            <div className="bg-amber-50 dark:bg-amber-950/20 border border-amber-100 dark:border-amber-900/40 rounded-xl p-3.5 flex items-start gap-2.5">
-              <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-              <p className="text-[11px] text-amber-700 dark:text-amber-300 leading-normal font-medium">
-                Warehouse compliance check active. Saving this sheet guarantees automatic deductions on active inventory counts immediately. Negative stock builds are strictly locked out.
-              </p>
+            <div className="bg-slate-50 dark:bg-slate-950 border border-slate-100 dark:border-slate-800 rounded-xl p-3.5 text-[11px] text-slate-500 dark:text-slate-400">
+              Invoice totals and line amounts update automatically as quantities change.
             </div>
           </div>
 

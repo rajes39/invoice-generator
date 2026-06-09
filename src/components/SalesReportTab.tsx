@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import { 
   BarChart, 
   Bar, 
@@ -33,11 +33,16 @@ export function SalesReportTab({
   showToast
 }: SalesReportTabProps) {
   const [searchQuery, setSearchQuery] = useState('');
+  const [customersData, setCustomersData] = useState<Customer[]>([]);
+  const [invoicesData, setInvoicesData] = useState<Invoice[]>([]);
+
+  const customersList = customers && customers.length ? customers : customersData;
+  const invoicesList = invoices && invoices.length ? invoices : invoicesData;
 
   // 1. Calculate aggregated Customer-Wise sales metrics
   const customerSalesMetrics = useMemo(() => {
-    return customers.map(cust => {
-      const custInvoices = invoices.filter(inv => inv.customerId === cust.id);
+    return customersList.map(cust => {
+      const custInvoices = invoicesList.filter(inv => inv.customerId === cust.id);
       
       const salesCount = custInvoices.length;
       const totalTaxable = custInvoices.reduce((sum, inv) => sum + inv.subtotal, 0);
@@ -56,7 +61,7 @@ export function SalesReportTab({
         grossSales
       };
     });
-  }, [customers, invoices]);
+  }, [customers, invoices, customersData, invoicesData]);
 
   // Overall sums for KPI boxes
   const aggregateTotals = useMemo(() => {
@@ -68,6 +73,24 @@ export function SalesReportTab({
       return totals;
     }, { taxable: 0, tax: 0, gross: 0, count: 0 });
   }, [customerSalesMetrics]);
+
+  // Fallback fetch from Supabase when parent props are empty
+  useEffect(() => {
+    (async () => {
+      try {
+        if ((!customers || customers.length === 0)) {
+          const raw = await localStorage.getItem('invoice_customers');
+          if (raw) setCustomersData(JSON.parse(raw));
+        }
+        if ((!invoices || invoices.length === 0)) {
+          const raw = await localStorage.getItem('invoice_records');
+          if (raw) setInvoicesData(JSON.parse(raw));
+        }
+      } catch (err) {
+        console.error('SalesReportTab fallback load error', err);
+      }
+    })();
+  }, []);
 
   // Sorted list of top buyers for the visual chart
   const topBuyersChartData = useMemo(() => {

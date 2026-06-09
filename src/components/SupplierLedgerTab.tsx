@@ -1,7 +1,9 @@
-import { useMemo, useState, Dispatch, SetStateAction, FormEvent } from 'react';
+import { useMemo, useState, useEffect, Dispatch, SetStateAction, FormEvent } from 'react';
 import { Purchase, Supplier, SupplierPayment } from '../types';
 import { Search, Plus, Download, WalletCards, X, CircleDollarSign } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
+import { SearchableDropdown } from './SearchableDropdown';
+import { supabase } from '../lib/supabase';
 
 interface SupplierLedgerTabProps {
   suppliers: Supplier[];
@@ -20,6 +22,26 @@ export function SupplierLedgerTab({ suppliers, purchases, supplierPayments, setS
   const [paymentDate, setPaymentDate] = useState(() => new Date().toISOString().split('T')[0]);
 
   const selectedSupplier = useMemo(() => suppliers.find(supplier => supplier.id === selectedSupplierId) || null, [selectedSupplierId, suppliers]);
+
+  const [openingBalanceMeta, setOpeningBalanceMeta] = useState<{ amount: number; type: string; date: string }>({ amount: 0, type: 'We owe them', date: new Date().toISOString().split('T')[0] });
+
+  useEffect(() => {
+    if (!selectedSupplierId) {
+      setOpeningBalanceMeta({ amount: 0, type: 'We owe them', date: new Date().toISOString().split('T')[0] });
+      return;
+    }
+    (async () => {
+      try {
+        const storedAmount = await localStorage.getItem(`supplier_opening_balance_amount_${selectedSupplierId}`);
+        const storedType = await localStorage.getItem(`supplier_opening_balance_type_${selectedSupplierId}`);
+        const storedDate = await localStorage.getItem(`supplier_opening_balance_date_${selectedSupplierId}`);
+        const amount = storedAmount ? Number(storedAmount) : 0;
+        setOpeningBalanceMeta({ amount, type: storedType === 'They owe us' ? 'They owe us' : 'We owe them', date: storedDate || new Date().toISOString().split('T')[0] });
+      } catch (err) {
+        console.error(err);
+      }
+    })();
+  }, [selectedSupplierId]);
 
   const ledgerEntries = useMemo(() => {
     if (!selectedSupplierId) return [];
@@ -48,7 +70,7 @@ export function SupplierLedgerTab({ suppliers, purchases, supplierPayments, setS
 
     const combined = [...purchaseEntries, ...paymentEntries].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
-    let runningBalance = 0;
+    let runningBalance = openingBalanceMeta.amount;
 
     return combined.map(entry => {
       runningBalance = runningBalance + entry.debit - entry.credit;
@@ -57,15 +79,15 @@ export function SupplierLedgerTab({ suppliers, purchases, supplierPayments, setS
         runningBalance,
       };
     });
-  }, [purchases, selectedSupplierId, supplierPayments]);
+  }, [purchases, selectedSupplierId, supplierPayments, openingBalanceMeta.amount]);
 
   const summary = useMemo(() => {
     const totalPurchaseAmount = ledgerEntries.filter(entry => entry.type === 'Purchase').reduce((sum, entry) => sum + entry.debit, 0);
     const totalPayments = ledgerEntries.filter(entry => entry.type === 'Payment').reduce((sum, entry) => sum + entry.credit, 0);
-    const outstandingBalance = totalPurchaseAmount - totalPayments;
+    const outstandingBalance = openingBalanceMeta.amount + totalPurchaseAmount - totalPayments;
 
     return { totalPurchaseAmount, totalPayments, outstandingBalance };
-  }, [ledgerEntries]);
+  }, [ledgerEntries, openingBalanceMeta.amount]);
 
   const handleSavePayment = (e: FormEvent) => {
     e.preventDefault();
@@ -155,15 +177,26 @@ export function SupplierLedgerTab({ suppliers, purchases, supplierPayments, setS
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
         <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3 shadow-xs">
           <p className="text-[10px] uppercase tracking-widest text-slate-400">Supplier</p>
-          <select value={selectedSupplierId} onChange={(e) => setSelectedSupplierId(e.target.value)} className="mt-2 w-full bg-slate-50 dark:bg-slate-950 rounded-md px-2 py-1.5 text-xs border border-slate-200 dark:border-slate-800">
-            <option value="">Select supplier</option>
-            {suppliers.map((supplier) => (
-              <option key={supplier.id} value={supplier.id}>{supplier.name}</option>
-            ))}
-          </select>
+          <div className="mt-2">
+            <SearchableDropdown
+              table="suppliers"
+              searchFields={['name', 'gstin', 'mobile']}
+              displayField="name"
+              helperFields={['gstin', 'mobile']}
+              onSelect={(s) => setSelectedSupplierId(s.id)}
+              placeholder="Search Supplier..."
+              value={selectedSupplier?.name}
+            />
+          </div>
+        </div>
+
+        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3 shadow-xs">
+          <p className="text-[10px] uppercase tracking-widest text-slate-400">Opening Balance</p>
+          <p className="mt-2 text-lg font-bold text-slate-900 dark:text-slate-50">₹{openingBalanceMeta.amount.toLocaleString('en-IN')}</p>
+          <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1">{openingBalanceMeta.type} as of {openingBalanceMeta.date}</p>
         </div>
 
         <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-3 shadow-xs">
@@ -199,6 +232,14 @@ export function SupplierLedgerTab({ suppliers, purchases, supplierPayments, setS
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                <tr className="bg-slate-50/70 dark:bg-slate-950/40">
+                  <td className="px-3 py-2 text-slate-700 dark:text-slate-200">{openingBalanceMeta.date}</td>
+                  <td className="px-3 py-2 font-semibold text-slate-800 dark:text-slate-100">Opening Balance</td>
+                  <td className="px-3 py-2 font-mono text-slate-700 dark:text-slate-200">—</td>
+                  <td className="px-3 py-2 text-right text-slate-700 dark:text-slate-200">₹{openingBalanceMeta.amount > 0 ? openingBalanceMeta.amount.toLocaleString('en-IN') : '0.00'}</td>
+                  <td className="px-3 py-2 text-right text-slate-700 dark:text-slate-200">₹{openingBalanceMeta.amount < 0 ? Math.abs(openingBalanceMeta.amount).toLocaleString('en-IN') : '0.00'}</td>
+                  <td className="px-3 py-2 text-right font-bold text-slate-900 dark:text-slate-50">₹{openingBalanceMeta.amount.toLocaleString('en-IN')}</td>
+                </tr>
                 {ledgerEntries.map((entry) => (
                   <tr key={entry.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-950/30">
                     <td className="px-3 py-2 text-slate-700 dark:text-slate-200">{entry.date}</td>

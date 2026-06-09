@@ -1,4 +1,4 @@
-import { useState, useMemo, Dispatch, SetStateAction, FormEvent } from 'react';
+import { useState, useMemo, useEffect, Dispatch, SetStateAction, FormEvent } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Users, 
@@ -35,10 +35,18 @@ export function CustomerLedgerTab({
   setPayments,
   showToast
 }: CustomerLedgerTabProps) {
+  // Local fallback state loaded directly from Supabase if parent props are empty
+  const [customersData, setCustomersData] = useState<Customer[]>([]);
+  const [invoicesData, setInvoicesData] = useState<Invoice[]>([]);
+  const [creditNotesData, setCreditNotesData] = useState<CreditNote[]>([]);
+  const [paymentsData, setPaymentsData] = useState<Payment[]>([]);
   const [selectedCustId, setSelectedCustId] = useState('');
   const [openingBalance, setOpeningBalance] = useState<number>(0);
+  const [openingBalanceType, setOpeningBalanceType] = useState<'They owe us' | 'We owe them'>('They owe us');
+  const [openingBalanceDate, setOpeningBalanceDate] = useState(new Date().toISOString().split('T')[0]);
   const [isRecordModalOpen, setIsRecordModalOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [openingBalancesMap, setOpeningBalancesMap] = useState<Record<string, number>>({});
 
   // Payment form states
   const [payAmount, setPayAmount] = useState<number | ''>('');
@@ -47,22 +55,53 @@ export function CustomerLedgerTab({
   const [payModeDetail, setPayModeDetail] = useState('BANK TRANSFER'); // Detail like e.g. Card, Transfer
   const [payNotes, setPayNotes] = useState('');
 
-  // 1. Fetch opening balance from localStorage
-  const activeCustomer = useMemo(() => {
-    const cust = customers.find(c => c.id === selectedCustId);
-    if (cust) {
-      const savedOp = localStorage.getItem(`customer_op_bal_${cust.id}`);
-      setOpeningBalance(savedOp ? Number(savedOp) : 0);
+  const activeCustomer = useMemo(() => customersList.find(c => c.id === selectedCustId) || null, [selectedCustId, customersList]);
+  // prefer props when available, otherwise use data fetched directly
+  const customersList = customers && customers.length ? customers : customersData;
+  const invoicesList = invoices && invoices.length ? invoices : invoicesData;
+  const creditNotesList = creditNotes && creditNotes.length ? creditNotes : creditNotesData;
+  const paymentsList = payments && payments.length ? payments : paymentsData;
+
+  useEffect(() => {
+    if (!selectedCustId) {
+      setOpeningBalance(0);
+      setOpeningBalanceType('They owe us');
+      setOpeningBalanceDate(new Date().toISOString().split('T')[0]);
+      return;
     }
-    return cust || null;
-  }, [selectedCustId, customers]);
+    // derive opening balance directly from the customer row (Supabase customers table)
+    (async () => {
+      try {
+        const cust = customersList.find(c => c.id === selectedCustId) || null;
+        const amount = cust ? Number(cust.openingBalanceAmount ?? (cust as any).opening_balance ?? 0) : 0;
+        setOpeningBalance(amount);
+        const oType = cust ? (cust.openingBalanceType ?? (cust as any).opening_balance_type ?? (cust as any).balance_type) : undefined;
+        setOpeningBalanceType(oType === 'We owe them' || oType === 'credit' ? 'We owe them' : 'They owe us');
+        setOpeningBalanceDate(cust ? (cust.openingBalanceDate ?? (cust as any).opening_balance_date ?? new Date().toISOString().split('T')[0]) : new Date().toISOString().split('T')[0]);
+      } catch (err) {
+        console.error('Error deriving opening balance from customer row', err);
+      }
+    })();
+  }, [selectedCustId]);
 
   // Update opening balance handler
   const handleUpdateOpeningBalance = (val: number) => {
     if (!activeCustomer) return;
     setOpeningBalance(val);
-    localStorage.setItem(`customer_op_bal_${activeCustomer.id}`, String(val));
-    showToast(`Opening balance for ${activeCustomer.name} updated to ₹${val}`, "success");
+    // Persist opening balance into customers table so ledger derives consistently from Supabase
+    try {
+      const updated = (customersList || []).map(c => c.id === activeCustomer.id ? { ...c, openingBalanceAmount: val, openingBalanceDate: openingBalanceDate } : c);
+      setOpeningBalancesMap(prev => ({ ...prev, [activeCustomer.id]: val }));
+      // update local fallback customers data so UI reflects change even when parent isn't updated immediately
+      setCustomersData(updated);
+      // update customers table via supabase helper
+      localStorage.setItem('invoice_customers', JSON.stringify(updated));
+      showToast(`Opening balance for ${activeCustomer.name} updated to ₹${val}`, "success");
+    } catch (err) {
+      console.error('Failed updating opening balance', err);
+      localStorage.setItem(`customer_opening_balance_amount_${activeCustomer.id}`, String(val));
+      showToast(`Opening balance for ${activeCustomer.name} updated to ₹${val}`, "success");
+    }
   };
 
   // 2. Compile Ledger Entries Chronologically
@@ -80,7 +119,7 @@ export function CustomerLedgerTab({
     }[] = [];
 
     // Add Invoices (Debits)
-    invoices
+    invoicesList
       .filter(inv => inv.customerId === selectedCustId)
       .forEach(inv => {
         entries.push({
@@ -95,7 +134,7 @@ export function CustomerLedgerTab({
       });
 
     // Add Credit Notes (Credits)
-    creditNotes
+    creditNotesList
       .filter(cn => cn.customerId === selectedCustId)
       .forEach(cn => {
         entries.push({
@@ -110,7 +149,7 @@ export function CustomerLedgerTab({
       });
 
     // Add Payments (Credits)
-    payments
+    paymentsList
       .filter(p => p.customerId === selectedCustId)
       .forEach(p => {
         entries.push({
@@ -128,7 +167,7 @@ export function CustomerLedgerTab({
     entries.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
     // Compute continuous running balances
-    let runningVal = openingBalance;
+    let runningVal = openingBalanceType === 'We owe them' ? -openingBalance : openingBalance;
     return entries.map(item => {
       runningVal = runningVal + item.debit - item.credit;
       return {
@@ -136,7 +175,7 @@ export function CustomerLedgerTab({
         runningBalance: runningVal
       };
     });
-  }, [selectedCustId, invoices, creditNotes, payments, openingBalance]);
+  }, [selectedCustId, invoicesList, creditNotesList, paymentsList, openingBalance]);
 
   // Combined calculations for dynamic KPI cards
   const financials = useMemo(() => {
@@ -153,7 +192,8 @@ export function CustomerLedgerTab({
       }
     });
 
-    const totalOutstanding = openingBalance + salesVal - returnsVal - paymentsVal;
+    const baseBal = openingBalanceType === 'We owe them' ? -openingBalance : openingBalance;
+    const totalOutstanding = baseBal + salesVal - returnsVal - paymentsVal;
 
     return {
       totalSales: salesVal,
@@ -161,23 +201,24 @@ export function CustomerLedgerTab({
       totalPayments: paymentsVal,
       balance: totalOutstanding
     };
-  }, [ledgerEntries, openingBalance]);
+  }, [ledgerEntries, openingBalance, openingBalanceType]);
 
   // Overall aggregate list for overview (if no customer is selected)
   const masterOverview = useMemo(() => {
-    return customers.map(cust => {
+    return customersList.map(cust => {
       // Calculate opening, invoices, returns, payments
-      const savedOp = localStorage.getItem(`customer_op_bal_${cust.id}`);
-      const op = savedOp ? Number(savedOp) : 0;
+      const op = openingBalancesMap[cust.id] ?? 0;
+      const opType = (cust as any).opening_balance_type || (cust as any).openingBalanceType || (cust as any).balance_type || 'debit';
+      const baseOp = (opType === 'We owe them' || opType === 'credit') ? -op : op;
 
-      const custInvoices = invoices.filter(inv => inv.customerId === cust.id);
-      const custNotes = creditNotes.filter(cn => cn.customerId === cust.id);
-      const custPayments = payments.filter(p => p.customerId === cust.id);
+      const custInvoices = invoicesList.filter(inv => inv.customerId === cust.id);
+      const custNotes = creditNotesList.filter(cn => cn.customerId === cust.id);
+      const custPayments = paymentsList.filter(p => p.customerId === cust.id);
 
       const sales = custInvoices.reduce((acc, current) => acc + current.totalAmount, 0);
       const returns = custNotes.reduce((acc, current) => acc + current.totalAmount, 0);
       const paySum = custPayments.reduce((acc, current) => acc + current.amount, 0);
-      const closingOutstanding = op + sales - returns - paySum;
+      const closingOutstanding = baseOp + sales - returns - paySum;
 
       return {
         id: cust.id,
@@ -192,13 +233,48 @@ export function CustomerLedgerTab({
         balance: closingOutstanding
       };
     });
-  }, [customers, invoices, creditNotes, payments]);
+  }, [customersList, invoicesList, creditNotesList, paymentsList, openingBalancesMap]);
+
+  // Build opening balances map from customer rows (prefers Supabase customers table)
+  useEffect(() => {
+    const map: Record<string, number> = {};
+    (customersList || []).forEach(c => {
+      map[c.id] = Number((c as any).openingBalanceAmount ?? (c as any).opening_balance ?? 0);
+    });
+    setOpeningBalancesMap(map);
+  }, [customersList]);
+
+  // If parent did not supply data (e.g. empty arrays), fetch directly from Supabase as a fallback
+  useEffect(() => {
+    (async () => {
+      try {
+        if ((!customers || customers.length === 0)) {
+          const raw = await localStorage.getItem('invoice_customers');
+          if (raw) setCustomersData(JSON.parse(raw));
+        }
+        if ((!invoices || invoices.length === 0)) {
+          const raw = await localStorage.getItem('invoice_records');
+          if (raw) setInvoicesData(JSON.parse(raw));
+        }
+        if ((!creditNotes || creditNotes.length === 0)) {
+          const raw = await localStorage.getItem('invoice_credit_notes');
+          if (raw) setCreditNotesData(JSON.parse(raw));
+        }
+        if ((!payments || payments.length === 0)) {
+          const raw = await localStorage.getItem('invoice_payments');
+          if (raw) setPaymentsData(JSON.parse(raw));
+        }
+      } catch (err) {
+        console.error('CustomerLedgerTab fallback load error', err);
+      }
+    })();
+  }, []);
 
   // Filter master overview by search input
   const searchedOverview = masterOverview.filter(row => 
     row.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    row.mobile.includes(searchQuery) ||
-    row.gstin.toLowerCase().includes(searchQuery.toLowerCase())
+    String(row.mobile || '').includes(searchQuery) ||
+    String(row.gstin || '').toLowerCase().includes(searchQuery.toLowerCase())
   );
 
   // 3. Record collected payments
@@ -222,7 +298,7 @@ export function CustomerLedgerTab({
       type: payType
     };
 
-    const updatedList = [newPayment, ...payments];
+    const updatedList = [newPayment, ...paymentsList];
     setPayments(updatedList);
     localStorage.setItem('invoice_payments', JSON.stringify(updatedList));
 
@@ -236,7 +312,7 @@ export function CustomerLedgerTab({
 
   // 4. Delete payment
   const handleDeletePayment = (payId: string) => {
-    const fresh = payments.filter(p => p.id !== payId);
+    const fresh = paymentsList.filter(p => p.id !== payId);
     setPayments(fresh);
     localStorage.setItem('invoice_payments', JSON.stringify(fresh));
     showToast("Payment receipt deleted, balance adjusted", "info");
@@ -316,7 +392,7 @@ export function CustomerLedgerTab({
             className="w-full text-xs text-indigo-600 font-bold bg-transparent border-none outline-none focus:ring-0 cursor-pointer dark:text-slate-100"
           >
             <option value="" className="dark:bg-slate-900 font-semibold text-slate-400">--- View Master Balance Sheet Overview ---</option>
-            {customers.map(c => (
+            {customersList.map(c => (
               <option key={c.id} value={c.id} className="dark:bg-slate-900">{c.name} {c.mobile ? `(${c.mobile})` : ''}</option>
             ))}
           </select>
@@ -358,7 +434,7 @@ export function CustomerLedgerTab({
             <div className="bg-white dark:bg-slate-900 rounded-xl p-4 border border-slate-200 dark:border-slate-800 text-left shadow-xs">
               <span className="text-[9px] text-slate-400 uppercase font-bold tracking-wider block">Total Sales (+ Debits)</span>
               <div className="text-lg font-black font-mono text-slate-900 dark:text-slate-100 mt-1">₹{financials.totalSales.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</div>
-              <span className="text-[9.5px] text-slate-400 block mt-0.5 font-medium font-mono">{invoices.filter(i => i.customerId === selectedCustId).length} billing invoices posted</span>
+              <span className="text-[9.5px] text-slate-400 block mt-0.5 font-medium font-mono">{invoicesList.filter(i => i.customerId === selectedCustId).length} billing invoices posted</span>
             </div>
 
             <div className="bg-white dark:bg-slate-900 rounded-xl p-4 border border-slate-200 dark:border-slate-800 text-left shadow-xs">
@@ -405,12 +481,14 @@ export function CustomerLedgerTab({
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-850">
                     {/* Display Opening Row */}
                     <tr className="bg-slate-50/20 dark:bg-slate-950/10 font-bold text-slate-500 italic text-[11px]">
-                      <td className="py-2.5 px-4">-</td>
-                      <td className="py-2.5 px-3">Master Statement Starting Opening Balance</td>
+                      <td className="py-2.5 px-4">{openingBalanceDate}</td>
+                      <td className="py-2.5 px-3">Opening Balance ({openingBalanceType})</td>
                       <td className="py-2.5 px-2">-</td>
-                      <td className="py-2.5 px-3 text-right font-mono">{openingBalance >= 0 ? `₹${openingBalance.toFixed(2)}` : '-'}</td>
-                      <td className="py-2.5 px-3 text-right font-mono">{openingBalance < 0 ? `₹${Math.abs(openingBalance).toFixed(2)}` : '-'}</td>
-                      <td className="py-2.5 px-4 text-right font-mono text-slate-800 dark:text-slate-200">₹{openingBalance.toFixed(2)}</td>
+                      <td className="py-2.5 px-3 text-right font-mono">{openingBalanceType === 'They owe us' ? `₹${openingBalance.toFixed(2)}` : '-'}</td>
+                      <td className="py-2.5 px-3 text-right font-mono">{openingBalanceType === 'We owe them' ? `₹${openingBalance.toFixed(2)}` : '-'}</td>
+                      <td className="py-2.5 px-4 text-right font-mono text-slate-800 dark:text-slate-200">
+                        ₹{(openingBalanceType === 'We owe them' ? -openingBalance : openingBalance).toFixed(2)}
+                      </td>
                       <td className="py-2.5 px-2"></td>
                     </tr>
 

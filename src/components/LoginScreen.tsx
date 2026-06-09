@@ -1,83 +1,108 @@
 import { useState, FormEvent } from 'react';
 import { motion } from 'motion/react';
 import { Lock, Mail, FileSpreadsheet, Eye, EyeOff, UserPlus, LogIn } from 'lucide-react';
+import { signInWithEmail, signUpWithEmail, createOrUpdateProfile } from '../supabase';
 
 interface LoginScreenProps {
   onLoginSuccess: (email: string) => void;
   showToast: (message: string, type: 'success' | 'error' | 'info') => void;
 }
 
+const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 export function LoginScreen({ onLoginSuccess, showToast }: LoginScreenProps) {
   const [isLogin, setIsLogin] = useState(true);
-  const [email, setEmail] = useState('admin@example.com');
-  const [password, setPassword] = useState('admin123');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleSubmit = (e: FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
 
-    setTimeout(() => {
+    try {
       const emailTrimmed = email.trim().toLowerCase();
       const pwd = password;
 
       if (!emailTrimmed || !pwd) {
-        showToast("Email and password fields are required", "error");
-        setIsSubmitting(false);
+        showToast('Email and password fields are required', 'error');
         return;
       }
 
-      // Read users list from localStorage or fallback to defaults
-      const savedUsersJson = localStorage.getItem('invoice_users');
-      const users = savedUsersJson ? JSON.parse(savedUsersJson) : [
-        { email: 'admin@example.com', password: 'admin123' },
-        { email: 'bandhanrajesh123@gmail.com', password: 'admin123' }
-      ];
+      if (!emailRegex.test(emailTrimmed)) {
+        showToast('Please enter a valid email address', 'error');
+        return;
+      }
+
+      if (!isLogin && pwd.length < 8) {
+        showToast('Password must be at least 8 characters long', 'error');
+        return;
+      }
+
+      if (!isLogin && pwd !== confirmPassword) {
+        showToast('Passwords do not match', 'error');
+        return;
+      }
 
       if (isLogin) {
-        // Login behavior
-        const foundUser = users.find(
-          (u: any) => u.email.toLowerCase() === emailTrimmed && u.password === pwd
-        );
-
-        if (foundUser) {
-          localStorage.setItem('invoice_logged_in_user', JSON.stringify({ email: foundUser.email }));
-          showToast("Welcome back! Logged in successfully.", "success");
-          onLoginSuccess(foundUser.email);
-        } else {
-          showToast("Invalid credentials. Try admin@example.com / admin123", "error");
+        const { data, error } = await signInWithEmail(emailTrimmed, pwd);
+        if (error) {
+          const message = String(error.message || 'Authentication failed');
+          if (message.toLowerCase().includes('invalid login credentials')) {
+            showToast('Wrong email or password', 'error');
+          } else if (message.toLowerCase().includes('password')) {
+            showToast('Wrong password. Please try again.', 'error');
+          } else {
+            showToast(message, 'error');
+          }
+          return;
         }
+
+        const user = data.session?.user;
+        if (!user) {
+          showToast('Unable to authenticate. Please try again.', 'error');
+          return;
+        }
+
+        showToast('Welcome back! Logged in successfully.', 'success');
+        onLoginSuccess(user.email ?? emailTrimmed);
       } else {
-        // Signup behavior
-        if (pwd.length < 6) {
-          showToast("Password must be at least 6 characters long", "error");
-          setIsSubmitting(false);
+        const { data, error } = await signUpWithEmail(emailTrimmed, pwd);
+        if (error) {
+          const message = String(error.message || 'Registration failed');
+          if (message.toLowerCase().includes('already registered')) {
+            showToast('An account with this email already exists.', 'error');
+          } else {
+            showToast(message, 'error');
+          }
           return;
         }
 
-        if (pwd !== confirmPassword) {
-          showToast("Passwords do not match", "error");
-          setIsSubmitting(false);
-          return;
+        const user = data.user ?? data.session?.user;
+        if (user) {
+          await createOrUpdateProfile({
+            id: user.id,
+            email: emailTrimmed,
+            role: 'operator',
+          });
         }
 
-        const userExists = users.some((u: any) => u.email.toLowerCase() === emailTrimmed);
-        if (userExists) {
-          showToast("An account with this email already exists", "error");
-          setIsSubmitting(false);
-          return;
+        if (data.session?.user) {
+          showToast('Registration successful. You are now logged in.', 'success');
+          onLoginSuccess(data.session.user.email ?? emailTrimmed);
+        } else {
+          showToast('Registration successful. You can now sign in immediately.', 'success');
+          setIsLogin(true);
         }
-
-        const newUsers = [...users, { email: emailTrimmed, password: pwd }];
-        localStorage.setItem('invoice_users', JSON.stringify(newUsers));
-        localStorage.setItem('invoice_logged_in_user', JSON.stringify({ email: emailTrimmed }));
-        showToast("Account successfully registered! Logged in automatically.", "success");
-        onLoginSuccess(emailTrimmed);
       }
+    } catch (err) {
+      console.error('Auth error', err);
+      showToast('An error occurred during authentication. See console for details.', 'error');
+    } finally {
       setIsSubmitting(false);
-    }, 600);
+    }
   };
 
   const toggleAuthMode = () => {
@@ -210,18 +235,6 @@ export function LoginScreen({ onLoginSuccess, showToast }: LoginScreenProps) {
             >
               {isLogin ? "Don't have an account? Sign Up" : "Already have an account? Sign In"}
             </button>
-          </div>
-
-          <div className="mt-6 pt-6 border-t border-slate-100 dark:border-slate-800">
-            <div className="bg-amber-50 dark:bg-amber-950/20 border border-amber-100 dark:border-amber-900/40 rounded-xl p-3.5">
-              <span className="text-xs font-semibold text-amber-800 dark:text-amber-400 block mb-1">
-                Default Credentials:
-              </span>
-              <p className="text-xs text-amber-700 dark:text-amber-300 leading-relaxed font-mono">
-                Email: <strong className="text-amber-900 dark:text-amber-250">admin@example.com</strong> <br />
-                Password: <strong className="text-amber-900 dark:text-amber-250">admin123</strong>
-              </p>
-            </div>
           </div>
         </div>
       </motion.div>

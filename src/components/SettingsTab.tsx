@@ -20,6 +20,10 @@ export function SettingsTab({ businessProfile, setBusinessProfile, showToast }: 
   const [email, setEmail] = useState(businessProfile.email);
   const [state, setState] = useState(businessProfile.state);
   const [logo, setLogo] = useState(businessProfile.logo);
+  const [bankName, setBankName] = useState(businessProfile.bankName);
+  const [accountNumber, setAccountNumber] = useState(businessProfile.accountNumber);
+  const [ifscCode, setIfscCode] = useState(businessProfile.ifscCode);
+  const [termsText, setTermsText] = useState(businessProfile.terms.join('\n'));
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -33,6 +37,8 @@ export function SettingsTab({ businessProfile, setBusinessProfile, showToast }: 
       showToast("GSTIN format is incorrect (e.g., 19AAACS2312M1Z5)", "info");
     }
 
+    const normalizedTerms = termsText.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+
     setBusinessProfile({
       name: name.trim(),
       gstin: gstin.trim().toUpperCase(),
@@ -40,7 +46,18 @@ export function SettingsTab({ businessProfile, setBusinessProfile, showToast }: 
       phone: phone.trim(),
       email: email.trim(),
       state,
-      logo
+      logo,
+      bankName: bankName.trim() || 'ICICI BANK',
+      accountNumber: accountNumber.trim() || '444305000091',
+      ifscCode: ifscCode.trim() || 'ICIC0004443',
+      terms: normalizedTerms.length > 0 ? normalizedTerms : [
+        "GOODS ONCE SOLD CANNOT BE TAKEN BACK",
+        "OUR RESPONSILIBITY CEASES WHEN GOODS LEAVE OUR PREMISES",
+        "INTEREST @18% PA WILL BE CHARGED IF BILL NOT PAID WITHIN 7 DAYS",
+        "ALL DISPUTES ARE SUBJECT TO MURSHIDABAD JURISDICTION ONLY",
+        "ALL CHEQUES ARE SUBJECT TO REALIZATION.",
+        "CHEQUE DISHONOURED CHARGES @ RS.500/- PER LEAF"
+      ]
     });
 
     showToast("Business profile updated successfully!", "success");
@@ -229,7 +246,7 @@ export function SettingsTab({ businessProfile, setBusinessProfile, showToast }: 
               </div>
             </div>
 
-            <div className="grid grid-cols-1 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
                   Seller Point state Origin
@@ -244,6 +261,58 @@ export function SettingsTab({ businessProfile, setBusinessProfile, showToast }: 
                   ))}
                 </select>
               </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
+                  Bank Name
+                </label>
+                <input
+                  type="text"
+                  value={bankName}
+                  onChange={(e) => setBankName(e.target.value)}
+                  placeholder="ICICI BANK"
+                  className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-850 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 dark:text-slate-100"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
+                  Account Number
+                </label>
+                <input
+                  type="text"
+                  value={accountNumber}
+                  onChange={(e) => setAccountNumber(e.target.value)}
+                  placeholder="444305000091"
+                  className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-850 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 dark:text-slate-100"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
+                  IFSC Code
+                </label>
+                <input
+                  type="text"
+                  value={ifscCode}
+                  onChange={(e) => setIfscCode(e.target.value)}
+                  placeholder="ICIC0004443"
+                  className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-850 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 dark:text-slate-100"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
+                Invoice Terms & Conditions (one per line)
+              </label>
+              <textarea
+                value={termsText}
+                onChange={(e) => setTermsText(e.target.value)}
+                rows={6}
+                placeholder="GOODS ONCE SOLD CANNOT BE TAKEN BACK"
+                className="w-full px-3.5 py-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-850 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 dark:text-slate-100"
+              />
             </div>
 
             <div>

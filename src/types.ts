@@ -1,26 +1,58 @@
+export interface InvoiceRow {
+  id: string;
+  partNo: string;
+  description: string;
+  hsn: string;
+  oQty: number;
+  sQty?: number;
+  mrp: number;
+  disc: number;
+  gst: number;
+  customRate?: number | null;
+  isNetRateProduct?: boolean;
+}
+
 export interface Customer {
   id: string;
   name: string;
   mobile: string;
   gstin: string;
   address: string;
+  pincode: string;
+  city?: string;
   state: string;
+  stateCode?: string;
+  routeId?: string;
   aadhar?: string;
   pan?: string;
   root?: string;
+  openingBalanceAmount?: number;
+  openingBalanceType?: 'They owe us' | 'We owe them';
+  balanceType?: 'receivable' | 'payable';
+  openingBalanceDate?: string;
 }
 
 export interface Product {
   id: string;
+  sku: string;
   name: string;
-  partNumber: string;
+  barcode?: string;
   brand: string;
-  category?: string;
+  category: string;
   hsnCode: string;
-  sellingPrice: number;
-  gstRate: number; // 5, 12, 18, 28
-  currentStock: number;
-  isNetProduct?: boolean; // Net Product (No discount allowed)
+  mrp: number;
+  gstRate: number;
+  unit: string;
+  stock: number;
+  reorderLevel?: number;
+}
+
+export interface PricingRule {
+  id: string;
+  customerId: string;
+  type: 'BRAND_DISCOUNT' | 'PRODUCT_DISCOUNT' | 'PRODUCT_NET_RATE';
+  target: string; // Brand Name or Product ID
+  value: number; // Discount % or Net Rate Amount
 }
 
 export interface InvoiceItem {
@@ -47,21 +79,30 @@ export interface Invoice {
   customerId: string;
   customerName: string;
   customerMobile: string;
+  customerEmail: string;
   customerGstin: string;
+  customerPan?: string;
+  customerAadhar?: string;
   customerAddress: string;
+  deliveryAddress?: string;
   customerState: string;
   items: InvoiceItem[];
   discountPercent: number; // discount on whole invoice subtotal/total
-  subtotal: number; // sum of item subtotals
-  discountAmount: number;
+  subtotal: number; // sum of item subtotals (MRP × Qty)
+  discountAmount: number; // total discount amount (MRP - Rate) × Qty plus any invoice-level discount
   taxAmount: number; // total tax (CGST+SGST or IGST)
   cgstAmount: number;
   sgstAmount: number;
   igstAmount: number;
-  totalAmount: number; // subtotal - discountAmount + taxAmount
+  totalAmount: number; // taxable subtotal + tax amount
   isSameState: boolean; // Same as business state (West Bengal)
   status: 'Paid' | 'Draft' | 'Sent';
   vehicleNo?: string;
+  irnNo?: string;
+  ackNo?: string;
+  ackDate?: string;
+  orderNo?: string;
+  remark?: string;
 }
 
 export interface BusinessProfile {
@@ -72,6 +113,26 @@ export interface BusinessProfile {
   email: string;
   state: string; // Defaults to "West Bengal"
   logo: string; // Emoji or visual icon representation
+  bankName: string;
+  accountNumber: string;
+  ifscCode: string;
+  terms: string[];
+}
+
+export interface CustomerDiscount {
+  id: string;
+  customerId: string;
+  type: 'BRAND' | 'PRODUCT';
+  target: string; // Brand name or Product ID
+  discountPercent: number;
+}
+
+export interface CustomerNetRate {
+  id: string;
+  customerId: string;
+  productId: string;
+  netRate: number;
+  productName?: string;
 }
 
 export interface CustomerDiscountRule {
@@ -136,6 +197,9 @@ export interface Supplier {
   gstin: string;
   address: string;
   state: string;
+  openingBalanceAmount?: number;
+  openingBalanceType?: 'We owe them' | 'They owe us';
+  openingBalanceDate?: string;
 }
 
 export interface PurchaseItem {

@@ -2,6 +2,7 @@ import { useState, Dispatch, SetStateAction, FormEvent, ChangeEvent } from 'reac
 import { Supplier } from '../types';
 import { Plus, Search, Edit2, Trash2, FileSpreadsheet, Download, Building2, Phone, MapPin, ShieldCheck, X } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
+import supabase from '../supabase';
 
 interface SuppliersTabProps {
   suppliers: Supplier[];
@@ -20,6 +21,10 @@ export function SuppliersTab({ suppliers, setSuppliers, showToast }: SuppliersTa
   const [gstin, setGstin] = useState('');
   const [address, setAddress] = useState('');
   const [state, setState] = useState('West Bengal');
+  const [openingBalanceAmount, setOpeningBalanceAmount] = useState<number | ''>('');
+  const [openingBalanceType, setOpeningBalanceType] = useState<'We owe them' | 'They owe us'>('We owe them');
+  const [openingBalanceDate, setOpeningBalanceDate] = useState(new Date().toISOString().split('T')[0]);
+  const [balanceImportSummary, setBalanceImportSummary] = useState<string>('');
 
   const openAddModal = () => {
     setEditingSupplier(null);
@@ -28,6 +33,9 @@ export function SuppliersTab({ suppliers, setSuppliers, showToast }: SuppliersTa
     setGstin('');
     setAddress('');
     setState('West Bengal');
+    setOpeningBalanceAmount('');
+    setOpeningBalanceType('We owe them');
+    setOpeningBalanceDate(new Date().toISOString().split('T')[0]);
     setIsModalOpen(true);
   };
 
@@ -38,7 +46,112 @@ export function SuppliersTab({ suppliers, setSuppliers, showToast }: SuppliersTa
     setGstin(supplier.gstin);
     setAddress(supplier.address);
     setState(supplier.state);
+    (async () => {
+      try {
+        const storedAmount = await localStorage.getItem(`supplier_opening_balance_amount_${supplier.id}`);
+        const storedType = await localStorage.getItem(`supplier_opening_balance_type_${supplier.id}`);
+        const storedDate = await localStorage.getItem(`supplier_opening_balance_date_${supplier.id}`);
+        setOpeningBalanceAmount(storedAmount ? Math.abs(Number(storedAmount)) : '');
+        setOpeningBalanceType(storedType === 'They owe us' ? 'They owe us' : 'We owe them');
+        setOpeningBalanceDate(storedDate || new Date().toISOString().split('T')[0]);
+      } catch (err) {
+        console.error(err);
+      }
+    })();
+
     setIsModalOpen(true);
+  };
+
+  const saveSupplierOpeningBalanceMeta = (supplierId: string, amount: number, type: string, date: string) => {
+    localStorage.setItem(`supplier_opening_balance_amount_${supplierId}`, String(amount)).catch(console.error);
+    localStorage.setItem(`supplier_opening_balance_type_${supplierId}`, type).catch(console.error);
+    localStorage.setItem(`supplier_opening_balance_date_${supplierId}`, date).catch(console.error);
+  };
+
+  const handleSupplierOpeningBalanceImport = (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const data = new Uint8Array(event.target?.result as ArrayBuffer);
+        const XLSX = (window as any).XLSX;
+        if (!XLSX) {
+          showToast('SheetJS library not loaded. Please try again.', 'error');
+          return;
+        }
+
+        const workbook = XLSX.read(data, { type: 'array' });
+        const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
+        if (rows.length < 2) {
+          showToast('The file is empty or malformed', 'error');
+          return;
+        }
+
+        const headers = rows[0].map((header: any) => String(header).trim().toLowerCase());
+        const nameIdx = headers.findIndex((h) => h.includes('supplier name') || h === 'supplier' || h.includes('name'));
+        const idIdx = headers.findIndex((h) => h.includes('supplier id') || h.includes('id'));
+        const amountIdx = headers.findIndex((h) => h.includes('opening balance amount') || h.includes('opening balance') || h.includes('amount'));
+        const typeIdx = headers.findIndex((h) => h.includes('balance type') || h.includes('debit') || h.includes('credit'));
+        const dateIdx = headers.findIndex((h) => h.includes('as on date') || h.includes('date'));
+
+        if (amountIdx === -1 || typeIdx === -1) {
+          showToast('Required balance columns missing. Please use the template.', 'error');
+          return;
+        }
+
+        let success = 0;
+        let failed = 0;
+        const failures: string[] = [];
+
+        for (let i = 1; i < rows.length; i++) {
+          const row = rows[i];
+          if (!row || row.length === 0) continue;
+
+          const incomingName = nameIdx !== -1 && row[nameIdx] ? String(row[nameIdx]).trim() : '';
+          const incomingId = idIdx !== -1 && row[idIdx] ? String(row[idIdx]).trim() : '';
+          const rawAmount = row[amountIdx] !== undefined && row[amountIdx] !== null ? String(row[amountIdx]).trim() : '';
+          const rawType = typeIdx !== -1 && row[typeIdx] ? String(row[typeIdx]).trim() : '';
+          const rawDate = dateIdx !== -1 && row[dateIdx] ? String(row[dateIdx]).trim() : new Date().toISOString().split('T')[0];
+
+          const matchedSupplier = suppliers.find(s => (incomingId && s.id === incomingId) || (incomingName && s.name.toLowerCase() === incomingName.toLowerCase()));
+          if (!matchedSupplier) {
+            failed += 1;
+            failures.push(`Row ${i + 1}: supplier not found`);
+            continue;
+          }
+
+          const amountValue = Number(rawAmount);
+          if (Number.isNaN(amountValue) || amountValue < 0) {
+            failed += 1;
+            failures.push(`Row ${i + 1}: invalid balance amount`);
+            continue;
+          }
+
+          const normalizedType = rawType.toLowerCase().includes('debit') ? 'Debit' : rawType.toLowerCase().includes('credit') ? 'Credit' : null;
+          if (!normalizedType) {
+            failed += 1;
+            failures.push(`Row ${i + 1}: invalid balance type`);
+            continue;
+          }
+
+          const signedAmount = normalizedType === 'Debit' ? amountValue : -amountValue;
+          saveSupplierOpeningBalanceMeta(matchedSupplier.id, signedAmount, normalizedType === 'Debit' ? 'We owe them' : 'They owe us', rawDate);
+          success += 1;
+        }
+
+        const summary = `${success} rows imported, ${failed} failed` + (failures.length ? `. ${failures.slice(0,3).join('; ')}` : '');
+        setBalanceImportSummary(summary);
+        showToast(`Supplier opening balance import complete: ${success} success, ${failed} failed.`, failed ? 'info' : 'success');
+      } catch (error: any) {
+        showToast('Error reading file: ' + error.message, 'error');
+      }
+    };
+
+    reader.readAsArrayBuffer(file);
+    e.target.value = '';
   };
 
   const handleSubmit = (e: FormEvent) => {
@@ -66,11 +179,12 @@ export function SuppliersTab({ suppliers, setSuppliers, showToast }: SuppliersTa
       state: state.trim() || 'West Bengal',
     };
 
+    const supplierId = normalizedSupplier.id;
     if (editingSupplier) {
       setSuppliers(prev => prev.map(item => item.id === editingSupplier.id ? normalizedSupplier : item));
       showToast('Supplier updated successfully', 'success');
     } else {
-      const duplicate = suppliers.some(item => item.gstin.toUpperCase() === normalizedSupplier.gstin || item.mobile === normalizedSupplier.mobile);
+      const duplicate = suppliers.some(item => (item.gstin || '').toUpperCase() === normalizedSupplier.gstin || item.mobile === normalizedSupplier.mobile);
       if (duplicate) {
         showToast('A supplier with the same GSTIN or mobile already exists', 'error');
         return;
@@ -78,6 +192,10 @@ export function SuppliersTab({ suppliers, setSuppliers, showToast }: SuppliersTa
       setSuppliers(prev => [normalizedSupplier, ...prev]);
       showToast('Supplier added successfully', 'success');
     }
+
+    const amountValue = openingBalanceAmount === '' ? 0 : Number(openingBalanceAmount);
+    const signedAmount = openingBalanceType === 'They owe us' ? -amountValue : amountValue;
+    saveSupplierOpeningBalanceMeta(supplierId, signedAmount, openingBalanceType, openingBalanceDate);
 
     setIsModalOpen(false);
   };
@@ -223,6 +341,23 @@ export function SuppliersTab({ suppliers, setSuppliers, showToast }: SuppliersTa
     showToast('Downloaded supplier import template', 'success');
   };
 
+  const downloadSupplierBalanceTemplate = () => {
+    const XLSX = (window as Window & { XLSX?: any }).XLSX;
+    if (!XLSX) {
+      showToast('SheetJS library not loaded', 'error');
+      return;
+    }
+
+    const worksheet = XLSX.utils.aoa_to_sheet([
+      ['Supplier Name', 'Supplier ID (optional)', 'Opening Balance Amount', 'Balance Type (Debit/Credit)', 'As On Date', 'Notes'],
+      ['ABC Traders', 'sup-12345', '62000', 'Debit', '2024-04-01', 'Opening balance carried forward from Tally'],
+    ]);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Supplier Balance Template');
+    XLSX.writeFile(workbook, 'Supplier_Opening_Balance_Template.xlsx');
+    showToast('Downloaded supplier opening balance template', 'success');
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex flex-col sm:flex-row gap-3 justify-between items-start sm:items-center">
@@ -247,6 +382,20 @@ export function SuppliersTab({ suppliers, setSuppliers, showToast }: SuppliersTa
           </label>
 
           <button
+            onClick={downloadSupplierBalanceTemplate}
+            className="bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold px-3 py-2 rounded-lg flex items-center gap-1.5 cursor-pointer shadow-xs"
+          >
+            <Download className="w-3.5 h-3.5" />
+            Download Balance Template
+          </button>
+
+          <label className="bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-bold px-3 py-2 rounded-lg flex items-center gap-1.5 cursor-pointer shadow-xs">
+            <FileSpreadsheet className="w-3.5 h-3.5" />
+            Import Opening Balance
+            <input type="file" accept=".xlsx,.csv" className="hidden" onChange={handleSupplierOpeningBalanceImport} />
+          </label>
+
+          <button
             onClick={exportSuppliers}
             className="bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold px-3 py-2 rounded-lg flex items-center gap-1.5 cursor-pointer shadow-xs"
           >
@@ -263,6 +412,12 @@ export function SuppliersTab({ suppliers, setSuppliers, showToast }: SuppliersTa
           </button>
         </div>
       </div>
+
+      {balanceImportSummary && (
+        <div className="rounded-lg border border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-950/40 p-3 text-sm text-slate-700 dark:text-slate-100 shadow-sm">
+          <span className="font-semibold">Opening Balance Import Summary:</span> {balanceImportSummary}
+        </div>
+      )}
 
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-2.5 flex items-center gap-2.5 shadow-xs">
         <Search className="w-4 h-4 text-slate-400 shrink-0" />
@@ -359,6 +514,21 @@ export function SuppliersTab({ suppliers, setSuppliers, showToast }: SuppliersTa
                 <label className="space-y-1 text-xs font-semibold text-slate-600 dark:text-slate-300">
                   State
                   <input value={state} onChange={(e) => setState(e.target.value)} className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm" placeholder="West Bengal" />
+                </label>
+                <label className="space-y-1 text-xs font-semibold text-slate-600 dark:text-slate-300">
+                  Opening Balance Amount
+                  <input value={openingBalanceAmount} type="number" min="0" step="0.01" onChange={(e) => setOpeningBalanceAmount(e.target.value === '' ? '' : Number(e.target.value))} className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm" placeholder="0.00" />
+                </label>
+                <label className="space-y-1 text-xs font-semibold text-slate-600 dark:text-slate-300">
+                  Balance Type
+                  <select value={openingBalanceType} onChange={(e) => setOpeningBalanceType(e.target.value as 'We owe them' | 'They owe us')} className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm">
+                    <option value="We owe them">We owe them</option>
+                    <option value="They owe us">They owe us</option>
+                  </select>
+                </label>
+                <label className="space-y-1 text-xs font-semibold text-slate-600 dark:text-slate-300">
+                  As On Date
+                  <input type="date" value={openingBalanceDate} onChange={(e) => setOpeningBalanceDate(e.target.value)} className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm" />
                 </label>
                 <div className="md:col-span-2 flex justify-end gap-2 mt-1">
                   <button type="button" onClick={() => setIsModalOpen(false)} className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-bold text-slate-700 dark:text-slate-200 cursor-pointer">Cancel</button>

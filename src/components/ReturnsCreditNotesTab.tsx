@@ -1,4 +1,4 @@
-import { useState, useMemo, Dispatch, SetStateAction, FormEvent } from 'react';
+import { useState, useMemo, useEffect, Dispatch, SetStateAction, FormEvent } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Plus, 
@@ -15,6 +15,7 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { Invoice, Product, CreditNote, CreditNoteItem, BusinessProfile } from '../types';
+import supabase from '../supabase';
 
 interface ReturnsCreditNotesTabProps {
   invoices: Invoice[];
@@ -41,10 +42,17 @@ export function ReturnsCreditNotesTab({
   const [selectedCreditNote, setSelectedCreditNote] = useState<CreditNote | null>(null);
   const [cnToDelete, setCnToDelete] = useState<CreditNote | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [invoicesData, setInvoicesData] = useState<Invoice[]>([]);
+  const [productsData, setProductsData] = useState<Product[]>([]);
+  const [creditNotesData, setCreditNotesData] = useState<CreditNote[]>([]);
+
+  const invoicesList = invoices && invoices.length ? invoices : invoicesData;
+  const productsList = products && products.length ? products : productsData;
+  const creditNotesList = creditNotes && creditNotes.length ? creditNotes : creditNotesData;
 
   // 1. Core Selection and calculations helper
   const selectedInvoice = useMemo(() => {
-    return invoices.find(inv => inv.id === selectedInvoiceId) || null;
+    return invoicesList.find(inv => inv.id === selectedInvoiceId) || null;
   }, [selectedInvoiceId, invoices]);
 
   // Compute what has already been returned for the current active invoice items to prevent over-returning
@@ -52,7 +60,7 @@ export function ReturnsCreditNotesTab({
     const counts: {[productId: string]: number} = {};
     if (!selectedInvoiceId) return counts;
     
-    creditNotes
+    creditNotesList
       .filter(cn => cn.invoiceId === selectedInvoiceId)
       .forEach(cn => {
         cn.items.forEach(it => {
@@ -156,23 +164,18 @@ export function ReturnsCreditNotesTab({
     };
 
     // Increment original warehouse Catalog Stocks
-    setProducts(prevProducts => {
-      const updated = prevProducts.map(p => {
-        const returnedUnit = cnItems.find(cnItem => cnItem.productId === p.id);
-        if (returnedUnit) {
-          return {
-            ...p,
-            currentStock: p.currentStock + returnedUnit.quantity
-          };
-        }
-        return p;
-      });
-      localStorage.setItem('invoice_products', JSON.stringify(updated));
-      return updated;
+    const updatedProducts = productsList.map(p => {
+      const returnedUnit = cnItems.find(cnItem => cnItem.productId === p.id);
+      if (returnedUnit) {
+        return { ...p, currentStock: p.currentStock + returnedUnit.quantity };
+      }
+      return p;
     });
+    setProducts(updatedProducts);
+    localStorage.setItem('invoice_products', JSON.stringify(updatedProducts));
 
     // Save credit notes lists
-    const updatedNotes = [newCreditNote, ...creditNotes];
+    const updatedNotes = [newCreditNote, ...creditNotesList];
     setCreditNotes(updatedNotes);
     localStorage.setItem('invoice_credit_notes', JSON.stringify(updatedNotes));
 
@@ -189,22 +192,17 @@ export function ReturnsCreditNotesTab({
     if (!cnToDelete) return;
 
     // Revert inventory levels: subtract stock increments that were returned
-    setProducts(prevProducts => {
-      const updated = prevProducts.map(p => {
-        const matchingNoteItem = cnToDelete.items.find(it => it.productId === p.id);
-        if (matchingNoteItem) {
-          return {
-            ...p,
-            currentStock: Math.max(0, p.currentStock - matchingNoteItem.quantity)
-          };
-        }
-        return p;
-      });
-      localStorage.setItem('invoice_products', JSON.stringify(updated));
-      return updated;
+    const updatedProducts = productsList.map(p => {
+      const matchingNoteItem = cnToDelete.items.find(it => it.productId === p.id);
+      if (matchingNoteItem) {
+        return { ...p, currentStock: Math.max(0, p.currentStock - matchingNoteItem.quantity) };
+      }
+      return p;
     });
+    setProducts(updatedProducts);
+    localStorage.setItem('invoice_products', JSON.stringify(updatedProducts));
 
-    const refreshedNotes = creditNotes.filter(cn => cn.id !== cnToDelete.id);
+    const refreshedNotes = creditNotesList.filter(cn => cn.id !== cnToDelete.id);
     setCreditNotes(refreshedNotes);
     localStorage.setItem('invoice_credit_notes', JSON.stringify(refreshedNotes));
 
@@ -212,8 +210,30 @@ export function ReturnsCreditNotesTab({
     setCnToDelete(null);
   };
 
+  // Fallback fetch from Supabase when parent props are empty
+  useEffect(() => {
+    (async () => {
+      try {
+        if ((!invoices || invoices.length === 0)) {
+          const raw = await localStorage.getItem('invoice_records');
+          if (raw) setInvoicesData(JSON.parse(raw));
+        }
+        if ((!products || products.length === 0)) {
+          const raw = await localStorage.getItem('invoice_products');
+          if (raw) setProductsData(JSON.parse(raw));
+        }
+        if ((!creditNotes || creditNotes.length === 0)) {
+          const raw = await localStorage.getItem('invoice_credit_notes');
+          if (raw) setCreditNotesData(JSON.parse(raw));
+        }
+      } catch (err) {
+        console.error('ReturnsCreditNotesTab fallback load error', err);
+      }
+    })();
+  }, []);
+
   // Search filter
-  const filteredNotes = creditNotes.filter(cn => 
+  const filteredNotes = creditNotesList.filter(cn => 
     cn.creditNoteNumber.toLowerCase().includes(searchQuery.toLowerCase()) ||
     cn.customerName.toLowerCase().includes(searchQuery.toLowerCase()) ||
     cn.invoiceNumber.toLowerCase().includes(searchQuery.toLowerCase())
@@ -369,7 +389,7 @@ export function ReturnsCreditNotesTab({
                     className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-850 rounded-xl text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:text-slate-200 cursor-pointer"
                   >
                     <option value="">-- Choose Invoice to Return From --</option>
-                    {invoices.map(inv => (
+                    {invoicesList.map(inv => (
                       <option key={inv.id} value={inv.id}>
                         {inv.invoiceNumber} | {inv.customerName} ({inv.date}) - ₹{inv.totalAmount.toLocaleString('en-IN')}
                       </option>

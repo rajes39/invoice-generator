@@ -31,12 +31,25 @@ export function ReportsTab({ invoices, customers, products, purchases, suppliers
   // Discount rules state
   const [discountRules, setDiscountRules] = useState<CustomerDiscountRule[]>([]);
 
-  // Load discount rules from localStorage on mount
+  // Load discount rules from Supabase on mount
   useEffect(() => {
-    const savedRules = localStorage.getItem('customer_discount_rules');
-    if (savedRules) {
-      setDiscountRules(JSON.parse(savedRules));
-    } else {
+    (async () => {
+      try {
+        const savedRules = await localStorage.getItem('customer_discount_rules');
+        if (savedRules) {
+          setDiscountRules(JSON.parse(savedRules));
+          return;
+        }
+      } catch (err) {
+        console.error(err);
+      }
+
+      // fallback seed
+      if (!customers || customers.length === 0) {
+        setDiscountRules([]);
+        return;
+      }
+
       // Seed some demo rules if desired
       const defaultRules: CustomerDiscountRule[] = [
         {
@@ -51,7 +64,7 @@ export function ReportsTab({ invoices, customers, products, purchases, suppliers
       ];
       setDiscountRules(defaultRules);
       localStorage.setItem('customer_discount_rules', JSON.stringify(defaultRules));
-    }
+    })();
   }, [customers]);
 
   // Save rules
