@@ -3,9 +3,10 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import * as z from 'zod';
+import * as XLSX from 'xlsx';
 import { supabase } from '../lib/supabase';
 import type { Product } from '../types';
-import { downloadCsv, parseCsv } from '../lib/csv';
+import { downloadCsv } from '../lib/csv';
 import toast from 'react-hot-toast';
 
 const schema = z.object({
@@ -175,60 +176,76 @@ export default function Products() {
     let errorCount = 0;
 
     try {
-      const data = await parseCsv(file);
       const { data: { session } } = await supabase.auth.getSession();
       const user = session?.user;
 
       if (!user) {
         toast.error('You must be logged in to upload data');
+        setIsUploading(false);
         return;
       }
 
-      setUploadProgress({ current: 0, total: data.length });
+      // Read file using SheetJS
+      const reader = new FileReader();
+      const rawData = await new Promise<any[]>((resolve, reject) => {
+        reader.onload = (evt) => {
+          try {
+            const bstr = evt.target?.result;
+            const wb = XLSX.read(bstr, { type: 'binary' });
+            const wsname = wb.SheetNames[0];
+            const ws = wb.Sheets[wsname];
+            const rows = XLSX.utils.sheet_to_json(ws);
+            resolve(rows);
+          } catch (err) { reject(err); }
+        };
+        reader.onerror = reject;
+        reader.readAsBinaryString(file);
+      });
+
+      if (!rawData || rawData.length === 0) {
+        toast.error('The file is empty or invalid');
+        setIsUploading(false);
+        return;
+      }
+
+      setUploadProgress({ current: 0, total: rawData.length });
       
-      const sanitizedRows = data.map(row => ({
+      const sanitizedRows = rawData.map(row => ({
         id: crypto.randomUUID(),
-        sku: sanitizeValue(row.sku),
-        name: sanitizeValue(row.name),
-        brand: sanitizeValue(row.brand),
-        category: sanitizeValue(row.category),
-        hsn_code: sanitizeValue(row.hsnCode),
-        mrp: Number(row.mrp || 0),
-        gst_rate: Number(row.gstRate || 0),
-        unit: sanitizeValue(row.unit),
-        stock: Number(row.stock || 0),
-        reorder_level: Number(row.reorderLevel || 0),
+        sku: sanitizeValue(row.sku || row.SKU),
+        part_no: sanitizeValue(row.sku || row.SKU || row.partNo || row.part_no),
+        name: sanitizeValue(row.name || row.Name),
+        brand: sanitizeValue(row.brand || row.Brand),
+        category: sanitizeValue(row.category || row.Category),
+        hsn_code: sanitizeValue(row.hsnCode || row.hsn_code || row.HSN),
+        mrp: Number(row.mrp || row.MRP || 0),
+        rate: Number(row.mrp || row.MRP || row.rate || row.Rate || 0),
+        gst_rate: Number(row.gstRate || row.gst_rate || 0),
+        unit: sanitizeValue(row.unit || row.Unit || 'Pcs'),
+        stock: Number(row.stock || row.Stock || row.openingStock || 0),
+        reorder_level: Number(row.reorderLevel || row.reorder_level || 0),
         user_id: user.id,
-        created_at: new Date().toISOString(),
-        data: row
+        created_at: new Date().toISOString()
       }));
 
-      const chunkArray = (arr: any[], size: number) => {
-        const chunks = [];
-        for (let i = 0; i < arr.length; i += size) {
-          chunks.push(arr.slice(i, i + size));
-        }
-        return chunks;
-      };
-
-      const chunks = chunkArray(sanitizedRows, 30);
-
-      for (const chunk of chunks) {
-        const { error } = await supabase.from('products').insert(chunk);
+      const BATCH_SIZE = 100;
+      for (let i = 0; i < sanitizedRows.length; i += BATCH_SIZE) {
+        const batch = sanitizedRows.slice(i, i + BATCH_SIZE);
+        const { error } = await supabase.from('products').insert(batch);
+        
         if (error) {
-          console.error('Error inserting chunk:', error);
-          errorCount += chunk.length;
+          console.error(`Error in batch starting at row ${i}:`, error);
+          errorCount += batch.length;
+          toast.error(`Batch failed at row ${i}: ${error.message}`);
         } else {
-          successCount += chunk.length;
+          successCount += batch.length;
         }
+
+        setUploadProgress({ current: Math.min(i + BATCH_SIZE, rawData.length), total: rawData.length });
         
-        setUploadProgress(prev => ({ 
-          ...prev, 
-          current: Math.min(prev.current + chunk.length, data.length) 
-        }));
-        
-        // Small delay to prevent rate limiting
-        await new Promise(resolve => setTimeout(resolve, 100));
+        if (i + BATCH_SIZE < sanitizedRows.length) {
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
       }
 
       queryClient.invalidateQueries({ queryKey: ['products'] });
@@ -244,7 +261,7 @@ export default function Products() {
     } finally {
       setIsUploading(false);
       setUploadProgress({ current: 0, total: 0 });
-      if (e.target) e.target.value = ''; // Reset input
+      if (e.target) e.target.value = '';
     }
   };
 
