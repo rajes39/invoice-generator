@@ -5,8 +5,19 @@ import { Search, Package, MapPin, AlertTriangle, Loader, Download } from 'lucide
 import { downloadCsv } from '../lib/csv';
 
 export default function Stock() {
+  const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
   const [selectedWarehouseId, setSelectedWarehouseId] = useState('All');
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+
+  // -- Adjustment State --
+  const [adjProductId, setAdjProductId] = useState('');
+  const [adjProductName, setAdjProductName] = useState('');
+  const [adjWarehouseId, setAdjWarehouseId] = useState('');
+  const [adjQty, setAdjQty] = useState<number>(0);
+  const [adjType, setAdjType] = useState<'In' | 'Out'>('In');
+  const [adjReason, setAdjReason] = useState('');
 
   const { data: products = [], isLoading: isLoadingProducts } = useQuery({
     queryKey: ['products_stock'],
@@ -21,7 +32,7 @@ export default function Stock() {
   });
 
   const { data: warehouses = [] } = useQuery({
-    queryKey: ['warehouses'],
+    queryKey: ['warehouses_all'],
     queryFn: async () => {
       const { data, error } = await supabase.from('warehouses').select('*').eq('is_active', true);
       if (error) throw error;
@@ -33,8 +44,6 @@ export default function Stock() {
     return products.filter((p: any) => {
       const matchesSearch = p.name.toLowerCase().includes(search.toLowerCase()) || 
                            (p.part_no || '').toLowerCase().includes(search.toLowerCase());
-      // For now, warehouse filtering is simple as we don't have a many-to-many warehouse-stock table
-      // In a real ERP, we'd query a `warehouse_stock` table.
       return matchesSearch;
     });
   }, [products, search]);
@@ -52,6 +61,61 @@ export default function Stock() {
     downloadCsv(headers, data, 'current_stock_report.csv');
   };
 
+  const saveAdjustment = async () => {
+    if (!adjProductId || !adjWarehouseId || adjQty <= 0) {
+      toast.error('Please fill all fields correctly');
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.user) throw new Error('Unauthorized');
+
+      // 1. Insert Stock Ledger Entry
+      const { error: ledgerError } = await supabase.from('stock_ledger').insert([{
+        user_id: session.user.id,
+        product_id: adjProductId,
+        warehouse_id: adjWarehouseId,
+        quantity: adjType === 'In' ? adjQty : -adjQty,
+        transaction_type: adjType,
+        reference_type: 'Manual Adjustment',
+        reference_id: `ADJ-${Date.now().toString().slice(-6)}`,
+        notes: adjReason
+      }]);
+
+      if (ledgerError) throw ledgerError;
+
+      // 2. Update Product Stock (Atomic increment/decrement would be better via RPC)
+      const currentProd = products.find((p: any) => p.id === adjProductId);
+      const newStock = adjType === 'In' ? (Number(currentProd.stock) + adjQty) : (Number(currentProd.stock) - adjQty);
+      
+      const { error: prodError } = await supabase
+        .from('products')
+        .update({ stock: newStock })
+        .eq('id', adjProductId);
+
+      if (prodError) throw prodError;
+
+      toast.success('Stock adjusted successfully!');
+      queryClient.invalidateQueries({ queryKey: ['products_stock'] });
+      setIsModalOpen(false);
+      resetAdjForm();
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to adjust stock');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const resetAdjForm = () => {
+    setAdjProductId('');
+    setAdjProductName('');
+    setAdjWarehouseId('');
+    setAdjQty(0);
+    setAdjReason('');
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
@@ -59,13 +123,22 @@ export default function Stock() {
           <h2 className="text-2xl font-bold text-slate-900 dark:text-slate-100">Inventory Stock</h2>
           <p className="text-sm text-slate-500 dark:text-slate-400">Real-time visibility into your current stock levels across all locations.</p>
         </div>
-        <button
-          onClick={handleExport}
-          className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-emerald-700 transition shadow-sm"
-        >
-          <Download className="w-4 h-4" />
-          Export Stock Report
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={() => setIsModalOpen(true)}
+            className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-bold text-white hover:bg-slate-800 transition shadow-sm"
+          >
+            <Plus className="w-4 h-4" />
+            Manual Adjustment
+          </button>
+          <button
+            onClick={handleExport}
+            className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-emerald-700 transition shadow-sm"
+          >
+            <Download className="w-4 h-4" />
+            Export Stock Report
+          </button>
+        </div>
       </div>
 
       <div className="glass-card rounded-3xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900">
@@ -148,6 +221,94 @@ export default function Stock() {
           </table>
         </div>
       </div>
+
+      {/* Manual Adjustment Modal */}
+      {isModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-950">
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-lg font-bold">Manual Stock Adjustment</h3>
+              <button onClick={() => setIsModalOpen(false)} className="rounded-xl p-2 hover:bg-slate-100">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div className="space-y-1">
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">Product</label>
+                <SearchableDropdown
+                  table="products"
+                  displayField="name"
+                  searchFields={['name', 'part_no']}
+                  onSelect={(p) => {
+                    setAdjProductId(p.id);
+                    setAdjProductName(p.name);
+                  }}
+                  placeholder="Select Product..."
+                  value={adjProductName}
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">Warehouse</label>
+                <select
+                  value={adjWarehouseId}
+                  onChange={(e) => setAdjWarehouseId(e.target.value)}
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2 text-sm outline-none dark:border-slate-700 dark:bg-slate-950"
+                >
+                  <option value="">Select Warehouse...</option>
+                  {warehouses.map((w: any) => (
+                    <option key={w.id} value={w.id}>{w.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">Adj Type</label>
+                  <select
+                    value={adjType}
+                    onChange={(e) => setAdjType(e.target.value as any)}
+                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2 text-sm outline-none font-bold"
+                  >
+                    <option value="In">Add Stock (+)</option>
+                    <option value="Out">Remove Stock (-)</option>
+                  </select>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">Qty</label>
+                  <input
+                    type="number"
+                    value={adjQty}
+                    onChange={(e) => setAdjQty(Number(e.target.value))}
+                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2 text-sm outline-none font-black text-indigo-600"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">Reason / Remarks</label>
+                <textarea
+                  value={adjReason}
+                  onChange={(e) => setAdjReason(e.target.value)}
+                  placeholder="E.g. Damaged, Correction, etc."
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2 text-sm outline-none min-h-[80px]"
+                />
+              </div>
+
+              <button
+                disabled={isSaving}
+                onClick={saveAdjustment}
+                className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 py-3 text-sm font-black text-white hover:bg-indigo-700 transition shadow-lg shadow-indigo-500/20"
+              >
+                {isSaving ? <Loader className="w-4 h-4 animate-spin" /> : <Package className="w-4 h-4" />}
+                Post Adjustment
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+

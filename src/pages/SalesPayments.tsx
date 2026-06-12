@@ -33,14 +33,22 @@ export default function SalesPayments() {
     );
   }, [invoices, search]);
 
-  const openPaymentModal = (invoice: any) => {
-    setSelectedInvoice(invoice);
-    setPaymentAmount(Number(invoice.grand_total));
+  const openPaymentModal = (invoice?: any) => {
+    if (invoice) {
+      setSelectedInvoice(invoice);
+      setPaymentAmount(Number(invoice.grand_total));
+    } else {
+      setSelectedInvoice(null);
+      setPaymentAmount(0);
+    }
     setIsModalOpen(true);
   };
 
   const handleSavePayment = async () => {
-    if (!selectedInvoice || paymentAmount <= 0) return;
+    if (!selectedInvoice || paymentAmount <= 0) {
+      toast.error('Please select an invoice and enter amount');
+      return;
+    }
 
     setIsSaving(true);
     try {
@@ -81,6 +89,13 @@ export default function SalesPayments() {
           <h2 className="text-2xl font-bold text-slate-900 dark:text-slate-100">Sales Payments</h2>
           <p className="text-sm text-slate-500 dark:text-slate-400">Track and record payments received from customers.</p>
         </div>
+        <button
+          onClick={() => openPaymentModal()}
+          className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-bold text-white hover:bg-slate-800 transition shadow-sm"
+        >
+          <Plus className="w-4 h-4" />
+          Add Payment
+        </button>
       </div>
 
       <div className="glass-card rounded-3xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900">
@@ -157,11 +172,29 @@ export default function SalesPayments() {
             </div>
 
             <div className="space-y-4">
-              <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100 dark:bg-slate-900 dark:border-slate-800">
-                <div className="text-[10px] uppercase font-black text-slate-400">Invoice Ref</div>
-                <div className="font-bold text-slate-900 dark:text-slate-100">{selectedInvoice?.invoice_no}</div>
-                <div className="text-xs text-slate-500">{selectedInvoice?.customer_name}</div>
-              </div>
+              {!selectedInvoice ? (
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">Select Invoice</label>
+                  <SearchableDropdown
+                    table="invoices"
+                    displayField="invoice_no"
+                    searchFields={['invoice_no', 'customer_name']}
+                    onSelect={(inv) => {
+                      setSelectedInvoice(inv);
+                      setPaymentAmount(Number(inv.grand_total));
+                    }}
+                    placeholder="Search Invoice No..."
+                    value={selectedInvoice?.invoice_no || ''}
+                  />
+                </div>
+              ) : (
+                <div className="bg-slate-50 p-3 rounded-2xl border border-slate-100 dark:bg-slate-900 dark:border-slate-800">
+                  <div className="text-[10px] uppercase font-black text-slate-400">Invoice Ref</div>
+                  <div className="font-bold text-slate-900 dark:text-slate-100">{selectedInvoice?.invoice_no}</div>
+                  <div className="text-xs text-slate-500">{selectedInvoice?.customer_name}</div>
+                  <button onClick={() => setSelectedInvoice(null)} className="text-[10px] text-indigo-600 font-bold mt-2">Change Invoice</button>
+                </div>
+              )}
 
               <div className="space-y-1">
                 <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">Amount Received (₹)</label>
