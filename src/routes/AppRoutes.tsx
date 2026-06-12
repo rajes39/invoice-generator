@@ -24,6 +24,7 @@ import TrialBalance from '../pages/TrialBalance';
 import ProfitAndLoss from '../pages/ProfitAndLoss';
 import BalanceSheet from '../pages/BalanceSheet';
 import AuditLog from '../pages/AuditLog';
+import BackupRestore from '../pages/BackupRestore';
 import ProtectedRoute from '../components/ProtectedRoute';
 
 function PlaceholderPage({ title, description }: { title: string; description: string }) {
@@ -339,6 +340,14 @@ export default function AppRoutes() {
         element={
           <ProtectedRoute>
             <Settings />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/settings/backup"
+        element={
+          <ProtectedRoute>
+            <BackupRestore />
           </ProtectedRoute>
         }
       />

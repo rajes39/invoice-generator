@@ -2,8 +2,9 @@ import { useState, useMemo } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
-import { deleteInvoice, mapInvoiceFromDb, numberToWords } from '../services/invoiceService';
-import type { Invoice, CompanySettings } from '../types';
+import { deleteInvoice, mapInvoiceFromDb } from '../services/invoiceService';
+import { generateInvoicePDFPage } from '../services/pdfService';
+import type { Invoice, CompanySettings } from '../types/index';
 import { toast } from 'react-hot-toast';
 import * as XLSX from 'xlsx';
 import jsPDF from 'jspdf';
@@ -21,19 +22,6 @@ import {
   Loader,
   Filter
 } from 'lucide-react';
-
-const TERMS = [
-  "GOODS ONCE SOLD CANNOT BE TAKEN BACK",
-  "OUR RESPONSIBILITY CEASES WHEN GOODS LEAVE OUR PREMISES",
-  "INTEREST @18% PA WILL BE CHARGED IF BILL NOT PAID WITHIN 7 DAYS",
-  "ALL DISPUTES ARE SUBJECT TO LOCAL JURISDICTION ONLY",
-  "ALL CHEQUES ARE SUBJECT TO REALIZATION",
-  "CHEQUE DISHONOURED CHARGES @ RS.500/- PER LEAF"
-];
-
-function formatCurrency(value: number) {
-  return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(value);
-}
 
 export default function Invoices() {
   const queryClient = useQueryClient();
@@ -69,8 +57,17 @@ export default function Invoices() {
                            inv.customerName.toLowerCase().includes(search.toLowerCase());
       
       const invDate = (inv.date || '').split('T')[0];
-      const matchesFrom = !fromDate || invDate >= fromDate;
-      const matchesTo = !toDate || invDate <= toDate;
+      
+      // Robust date filtering
+      let matchesFrom = true;
+      if (fromDate) {
+        matchesFrom = invDate >= fromDate;
+      }
+      
+      let matchesTo = true;
+      if (toDate) {
+        matchesTo = invDate <= toDate;
+      }
 
       return matchesSearch && matchesFrom && matchesTo;
     });
@@ -111,12 +108,12 @@ export default function Invoices() {
             'Invoice No': inv.invoiceNumber,
             'Customer Name': inv.customerName,
             'Billing Date': (inv.date || '').split('T')[0],
-            'MRP': item.mrpPerUnit || item.mrp_per_unit || 0,
-            'Rate': item.effectivePrice || item.effective_price || 0,
-            'Disc%': item.discountPercent || item.discount_percent || 0,
-            'Taxable Amount': item.basicAmount || item.basic_amount || 0,
-            'GST%': item.gstRate || item.gst_rate || 0,
-            'GST Amount': item.gstAmount || item.gst_amount || 0,
+            'MRP': item.mrpPerUnit || 0,
+            'Rate': item.effectivePrice || 0,
+            'Disc%': item.discountPercent || 0,
+            'Taxable Amount': item.basicAmount || 0,
+            'GST%': item.gstRate || 0,
+            'GST Amount': item.gstAmount || 0,
             'Grand Total': inv.grandTotal
           });
         });
@@ -164,181 +161,9 @@ export default function Invoices() {
     try {
       const doc = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'a4' });
       
-      // Helper for company fields
-      const getComp = (field: string, fallback: string = '') => {
-        if (!company) return fallback;
-        const c = company as any;
-        return c[field] || fallback;
-      };
-
-      const cName = getComp('company_name') || getComp('name') || 'MISTI AUTO CENTRE';
-      const cAddr = getComp('address') || '';
-      const cCity = getComp('city') || '';
-      const cPin = getComp('pincode') || '';
-      const cPhone = getComp('phone') || getComp('mobile') || '';
-      const cEmail = getComp('email') || '';
-      const cGstin = getComp('gstin') || '';
-      const cPan = getComp('pan') || '';
-      const cState = getComp('state') || '';
-      const cStateCode = getComp('state_code') || '';
-      const cBank = getComp('bank_name') || '';
-      const cAcc = getComp('account_number') || '';
-      const cIfsc = getComp('ifsc_code') || '';
-      const cBranch = getComp('branch') || '';
-
       for (let i = 0; i < filteredInvoices.length; i++) {
-        const inv = filteredInvoices[i];
         if (i > 0) doc.addPage();
-
-        // 1. Header
-        doc.setFontSize(18);
-        doc.setFont('helvetica', 'bold');
-        doc.text(cName.toUpperCase(), 297, 40, { align: 'center' });
-        
-        doc.setFontSize(9);
-        doc.setFont('helvetica', 'normal');
-        const headerLines = [
-          cAddr,
-          `${cCity}${cPin ? ' - ' + cPin : ''}`,
-          `Phone: ${cPhone} | Email: ${cEmail}`,
-          `GSTIN: ${cGstin} | PAN: ${cPan} | State: ${cState} (${cStateCode})`
-        ].filter(Boolean);
-        headerLines.forEach((line, j) => doc.text(line, 297, 55 + (j * 12), { align: 'center' }));
-
-        doc.setLineWidth(1);
-        doc.line(40, 105, 555, 105);
-
-        // 2. Title
-        doc.setFontSize(12);
-        doc.setFont('helvetica', 'bold');
-        doc.text("TAX INVOICE", 297, 120, { align: 'center' });
-
-        // 3. Meta Info
-        doc.setFontSize(8);
-        doc.text(`Invoice No: ${inv.invoiceNumber}`, 40, 140);
-        doc.text(`Date: ${(inv.date || '').split('T')[0]}`, 40, 152);
-        doc.text(`Due Date: ${(inv.dueDate || '').split('T')[0]}`, 40, 164);
-        
-        doc.text(`IRN: ${inv.irnNo || 'N/A'}`, 300, 140);
-        doc.text(`Ack No/Date: ${inv.ackNo || ''} ${inv.ackDate ? `(${inv.ackDate})` : ''}`, 300, 152);
-        doc.text(`Order No: ${inv.orderNo || 'N/A'}`, 300, 164);
-
-        // 4. Parties Boxes
-        doc.rect(40, 175, 255, 80);
-        doc.text("BUYER (BILL TO)", 45, 187);
-        doc.setFont('helvetica', 'normal');
-        doc.text(inv.customerName, 45, 200);
-        doc.text(inv.customerAddress || '', 45, 210, { maxWidth: 240 });
-        doc.text(`GSTIN: ${inv.customerGstin || 'URD'} | PAN: ${inv.customerPan || 'N/A'}`, 45, 235);
-        doc.text(`Phone: ${inv.customerPhone || 'N/A'}`, 45, 245);
-
-        doc.rect(300, 175, 255, 80);
-        doc.setFont('helvetica', 'bold');
-        doc.text("CONSIGNEE (SHIP TO)", 305, 187);
-        doc.setFont('helvetica', 'normal');
-        doc.text(inv.customerName, 305, 200);
-        doc.text(inv.deliveryAddress?.address || inv.customerAddress || '', 305, 210, { maxWidth: 240 });
-
-        // 5. Items Table
-        const tableData = (inv.items || []).map((item, idx) => [
-          idx + 1,
-          item.partNo || item.part_no || '',
-          item.productName || item.product_name || '',
-          item.hsnCode || item.hsn_code || '',
-          (item.mrpPerUnit || item.mrp_per_unit || 0).toFixed(2),
-          (item.effectivePrice || item.effective_price || 0).toFixed(2),
-          item.qty,
-          `${item.discountPercent || item.discount_percent || 0}%`,
-          (item.discountAmount || item.discount_amount || 0).toFixed(2),
-          (item.basicAmount || item.basic_amount || 0).toFixed(2),
-          `${item.gstRate || item.gst_rate || 0}%`,
-          (item.gstAmount || item.gst_amount || 0).toFixed(2),
-          (item.lineTotal || item.line_total || 0).toFixed(2)
-        ]);
-
-        if (inv.freightCharges > 0) {
-          tableData.push([
-            (inv.items?.length || 0) + 1,
-            '9965',
-            'Freight Charges',
-            '9965',
-            '',
-            '',
-            1,
-            '',
-            '',
-            inv.freightCharges.toFixed(2),
-            '18%',
-            inv.freightGst.toFixed(2),
-            (inv.freightCharges + inv.freightGst).toFixed(2)
-          ]);
-        }
-
-        (doc as any).autoTable({
-          head: [['Sr', 'Part', 'Description', 'HSN', 'MRP', 'Rate', 'Qty', 'D%', 'D(Rs)', 'Taxable', 'G%', 'G(Rs)', 'Amt']],
-          body: tableData,
-          startY: 265,
-          styles: { fontSize: 7, cellPadding: 2 },
-          headStyles: { fillColor: [40, 40, 40] },
-          columnStyles: {
-            0: { cellWidth: 20 },
-            2: { cellWidth: 100 },
-            12: { halign: 'right', fontStyle: 'bold' }
-          }
-        });
-
-        let finalY = (doc as any).lastAutoTable.finalY;
-
-        // 6. Totals Section
-        doc.setFontSize(8);
-        doc.setFont('helvetica', 'bold');
-        doc.text(`Goods Taxable:`, 400, finalY + 20);
-        doc.text(formatCurrency(inv.subtotalBasic), 550, finalY + 20, { align: 'right' });
-
-        let yOff = 20;
-        if (inv.freightCharges > 0) {
-          yOff += 12;
-          doc.text(`Freight + GST:`, 400, finalY + yOff);
-          doc.text(formatCurrency(inv.freightCharges + inv.freightGst), 550, finalY + yOff, { align: 'right' });
-        }
-
-        yOff += 12;
-        doc.text(`Total GST:`, 400, finalY + yOff);
-        doc.text(formatCurrency(inv.totalIgst || (inv.totalCgst + inv.totalSgst)), 550, finalY + yOff, { align: 'right' });
-
-        yOff += 12;
-        doc.setFontSize(11);
-        doc.rect(395, finalY + yOff, 160, 25);
-        doc.text(`BILL TOTAL:`, 400, finalY + yOff + 17);
-        doc.text(formatCurrency(inv.grandTotal), 550, finalY + yOff + 17, { align: 'right' });
-
-        // 7. Amount in Words
-        doc.setFontSize(8);
-        doc.setFont('helvetica', 'bolditalic');
-        doc.text(`Amount in Words: ${numberToWords(inv.grandTotal)} Only`, 40, finalY + yOff + 40);
-
-        // 8. Bank Details
-        doc.setFontSize(8);
-        doc.setFont('helvetica', 'bold');
-        doc.text("BANK DETAILS:", 40, finalY + yOff + 60);
-        doc.setFont('helvetica', 'normal');
-        if (cBank) doc.text(`Bank: ${cBank} | A/c: ${cAcc}`, 40, finalY + yOff + 72);
-        if (cIfsc) doc.text(`IFSC: ${cIfsc} | Branch: ${cBranch}`, 40, finalY + yOff + 84);
-
-        // 9. T&C
-        doc.setFont('helvetica', 'bold');
-        doc.text("TERMS & CONDITIONS:", 40, finalY + yOff + 105);
-        doc.setFontSize(6);
-        TERMS.forEach((t, idx) => doc.text(`${idx+1}. ${t}`, 40, finalY + yOff + 115 + (idx * 8)));
-
-        // 10. Signatures
-        doc.line(40, finalY + yOff + 180, 150, finalY + yOff + 180);
-        doc.text("Receiver Signature", 40, finalY + yOff + 192);
-
-        doc.setFontSize(8);
-        doc.text(`For ${cName.toUpperCase()}`, 400, finalY + yOff + 170);
-        doc.line(400, finalY + yOff + 180, 555, finalY + yOff + 180);
-        doc.text("Authorised Signatory", 400, finalY + yOff + 192);
+        generateInvoicePDFPage(doc, filteredInvoices[i], company || null);
       }
 
       const fileName = `Invoices_${fromDate || 'Start'}_to_${toDate || 'End'}.pdf`;
@@ -351,6 +176,7 @@ export default function Invoices() {
       setIsExporting(false);
     }
   };
+
 
   return (
     <div className="space-y-6">

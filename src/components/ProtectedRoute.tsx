@@ -3,6 +3,7 @@ import { Navigate } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
 import Header from './Header';
 import Sidebar from './Sidebar';
+import BackupAutoRunner from './BackupAutoRunner';
 
 export default function ProtectedRoute({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
@@ -25,6 +26,7 @@ export default function ProtectedRoute({ children }: { children: ReactNode }) {
     <div className="flex min-h-screen bg-slate-100 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
       <Sidebar />
       <div className="flex min-h-screen flex-1 flex-col">
+        <BackupAutoRunner />
         <Header />
         <main className="flex-1 p-6">{children}</main>
       </div>

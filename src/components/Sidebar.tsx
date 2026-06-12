@@ -73,6 +73,13 @@ const menuGroups = [
       { label: 'GST Summary', path: '/reports/gst-summary' },
     ],
   },
+  {
+    title: 'Settings',
+    items: [
+      { label: 'Company Settings', path: '/masters/company-settings' },
+      { label: 'Backup', path: '/settings/backup' },
+    ],
+  },
 ];
 
 export default function Sidebar() {

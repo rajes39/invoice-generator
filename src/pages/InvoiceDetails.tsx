@@ -8,18 +8,13 @@ import {
   Download, 
   FileSpreadsheet, 
   Loader,
-  User,
-  MapPin,
-  CreditCard,
-  Phone,
-  Mail,
-  Scale,
   Truck,
   ExternalLink
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import type { Invoice, CompanySettings } from '../types';
+import type { Invoice, CompanySettings } from '../types/index';
 import { numberToWords, fetchInvoiceById } from '../services/invoiceService';
+import { generateInvoicePDFPage } from '../services/pdfService';
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(value);
@@ -98,26 +93,18 @@ export default function InvoiceDetails() {
     queryFn: async () => {
       if (!invoice?.userId) return null as any;
       
-      // Try fetching with user_id
-      const { data, error } = await supabase
+      const { data } = await supabase
         .from('company_settings')
         .select('*')
         .eq('user_id', invoice.userId)
         .maybeSingle();
       
-      console.log('Company fetch - user_id:', invoice.userId);
-      console.log('Company data:', data);
-      console.log('Company error:', error);
-      
       if (!data) {
-        // Fallback: try fetching without filter (get first record)
-        const { data: fallbackData, error: fallbackError } = await supabase
+        const { data: fallbackData } = await supabase
           .from('company_settings')
           .select('*')
           .limit(1)
           .maybeSingle();
-        console.log('Fallback company data:', fallbackData);
-        console.log('Fallback error:', fallbackError);
         return fallbackData;
       }
       
@@ -158,28 +145,28 @@ export default function InvoiceDetails() {
 
   const gstSummary = goodsGstSummary;
 
-  // Safe company field getter - handles different possible column names
+  // Safe company field getter
   const getCompanyField = (field: string, fallback: string = '') => {
     if (!company) return fallback;
     const c = company as any;
     return c[field] || fallback;
   };
 
-  const companyName = getCompanyField('company_name') || getCompanyField('name') || getCompanyField('companyName') || 'YOUR COMPANY NAME';
-  const companyAddress = getCompanyField('address') || getCompanyField('company_address') || '';
-  const companyCity = getCompanyField('city') || getCompanyField('company_city') || '';
-  const companyPincode = getCompanyField('pincode') || getCompanyField('pin_code') || getCompanyField('zip') || '';
-  const companyPhone = getCompanyField('phone') || getCompanyField('mobile') || getCompanyField('contact') || '';
-  const companyEmail = getCompanyField('email') || getCompanyField('company_email') || '';
-  const companyGstin = getCompanyField('gstin') || getCompanyField('gst_number') || getCompanyField('gst_no') || '';
-  const companyPan = getCompanyField('pan') || getCompanyField('pan_number') || getCompanyField('pan_no') || '';
-  const companyState = getCompanyField('state') || getCompanyField('company_state') || '';
-  const companyStateCode = getCompanyField('state_code') || getCompanyField('statecode') || '';
-  const companyLogoUrl = getCompanyField('logo_url') || getCompanyField('logo') || '';
-  const companyBankName = getCompanyField('bank_name') || getCompanyField('bank') || '';
-  const companyAccountNumber = getCompanyField('account_number') || getCompanyField('account_no') || getCompanyField('acc_no') || '';
-  const companyIfsc = getCompanyField('ifsc_code') || getCompanyField('ifsc') || '';
-  const companyBranch = getCompanyField('branch') || getCompanyField('bank_branch') || '';
+  const companyName = getCompanyField('company_name') || getCompanyField('name') || 'YOUR COMPANY NAME';
+  const companyAddress = getCompanyField('address') || '';
+  const companyCity = getCompanyField('city') || '';
+  const companyPincode = getCompanyField('pincode') || '';
+  const companyPhone = getCompanyField('phone') || getCompanyField('mobile') || '';
+  const companyEmail = getCompanyField('email') || '';
+  const companyGstin = getCompanyField('gstin') || '';
+  const companyPan = getCompanyField('pan') || '';
+  const companyState = getCompanyField('state') || '';
+  const companyStateCode = getCompanyField('state_code') || '';
+  const companyLogoUrl = getCompanyField('logo_url') || '';
+  const companyBankName = getCompanyField('bank_name') || '';
+  const companyAccountNumber = getCompanyField('account_number') || '';
+  const companyIfsc = getCompanyField('ifsc_code') || '';
+  const companyBranch = getCompanyField('branch') || '';
 
   const exportExcel = () => {
     if (!invoice) return;
@@ -210,168 +197,10 @@ export default function InvoiceDetails() {
   const downloadPdf = () => {
     if (!invoice) return;
     const doc = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'a4' });
-    
-    // Header
-    doc.setFontSize(18);
-    doc.setFont('helvetica', 'bold');
-    doc.text(companyName.toUpperCase(), 297, 40, { align: 'center' });
-    
-    doc.setFontSize(9);
-    doc.setFont('helvetica', 'normal');
-    const headerLines = [
-      companyAddress,
-      `${companyCity}${companyPincode ? ' - ' + companyPincode : ''}`,
-      `Phone: ${companyPhone} | Email: ${companyEmail}`,
-      `GSTIN: ${companyGstin} | PAN: ${companyPan} | State: ${companyState} (${companyStateCode})`
-    ].filter(Boolean);
-    headerLines.forEach((line, i) => doc.text(line, 297, 55 + (i * 12), { align: 'center' }));
-
-    doc.setLineWidth(1);
-    doc.line(40, 105, 555, 105);
-
-    doc.setFontSize(12);
-    doc.setFont('helvetica', 'bold');
-    doc.text("TAX INVOICE", 297, 120, { align: 'center' });
-
-    // Meta Info
-    doc.setFontSize(8);
-    doc.setFont('helvetica', 'bold');
-    doc.text(`Invoice No: ${invoice.invoiceNumber}`, 40, 140);
-    doc.text(`Date: ${invoice.date.split('T')[0]}`, 40, 152);
-    doc.text(`Due Date: ${invoice.dueDate.split('T')[0]}`, 40, 164);
-    
-    doc.text(`IRN: ${invoice.irnNo || 'N/A'}`, 300, 140);
-    doc.text(`Ack No/Date: ${invoice.ackNo || ''} ${invoice.ackDate ? `(${invoice.ackDate})` : ''}`, 300, 152);
-    doc.text(`Order No: ${invoice.orderNo || 'N/A'}`, 300, 164);
-
-    // Parties
-    doc.rect(40, 175, 255, 80);
-    doc.text("BUYER (BILL TO)", 45, 187);
-    doc.setFont('helvetica', 'normal');
-    doc.text(invoice.customerName, 45, 200);
-    doc.text(invoice.customerAddress, 45, 210, { maxWidth: 240 });
-    doc.text(`GSTIN: ${invoice.customerGstin} | PAN: ${invoice.customerPan}`, 45, 235);
-
-    doc.rect(300, 175, 255, 80);
-    doc.setFont('helvetica', 'bold');
-    doc.text("CONSIGNEE (SHIP TO)", 305, 187);
-    doc.setFont('helvetica', 'normal');
-    doc.text(invoice.customerName, 305, 200);
-    doc.text(invoice.deliveryAddress.address || invoice.customerAddress, 305, 210, { maxWidth: 240 });
-
-    // Items Table
-    const tableData = invoice.items.map((item, i) => [
-      i + 1,
-      item.partNo,
-      item.productName,
-      item.hsnCode,
-      item.mrpPerUnit.toFixed(2),
-      item.effectivePrice.toFixed(2),
-      item.qty,
-      `${item.discountPercent}%`,
-      item.discountAmount.toFixed(2),
-      item.basicAmount.toFixed(2),
-      `${item.gstRate}%`,
-      item.gstAmount.toFixed(2),
-      item.lineTotal.toFixed(2)
-    ]);
-
-    if (invoice.freightCharges > 0) {
-      tableData.push([
-        invoice.items.length + 1,
-        '9965',
-        'Freight Charges',
-        '9965',
-        '',
-        '',
-        1,
-        '',
-        '',
-        invoice.freightCharges.toFixed(2),
-        '18%',
-        invoice.freightGst.toFixed(2),
-        (invoice.freightCharges + invoice.freightGst).toFixed(2)
-      ]);
-    }
-
-    (doc as any).autoTable({
-      head: [['Sr', 'Part', 'Description', 'HSN', 'MRP', 'Rate', 'Qty', 'D%', 'D(Rs)', 'Taxable', 'G%', 'G(Rs)', 'Amt']],
-      body: tableData,
-      startY: 265,
-      styles: { fontSize: 7, cellPadding: 2 },
-      headStyles: { fillColor: [40, 40, 40] },
-      columnStyles: {
-        0: { cellWidth: 20 },
-        1: { cellWidth: 35 },
-        2: { cellWidth: 100 },
-        6: { halign: 'center' },
-        12: { halign: 'right', fontStyle: 'bold' }
-      }
-    });
-
-    let finalY = (doc as any).lastAutoTable.finalY;
-
-    // Totals Section
-    doc.setFontSize(8);
-    doc.setFont('helvetica', 'bold');
-    doc.text(`Goods Taxable:`, 400, finalY + 20);
-    doc.text(formatCurrency(invoice.subtotalBasic), 550, finalY + 20, { align: 'right' });
-
-    let yOffset = 20;
-
-    if (invoice.freightCharges > 0) {
-      yOffset += 12;
-      doc.text(`Freight Charges:`, 400, finalY + yOffset);
-      doc.text(formatCurrency(invoice.freightCharges), 550, finalY + yOffset, { align: 'right' });
-      
-      yOffset += 12;
-      doc.text(`GST on Freight (18%):`, 400, finalY + yOffset);
-      doc.text(formatCurrency(invoice.freightGst), 550, finalY + yOffset, { align: 'right' });
-    }
-
-    yOffset += 12;
-    doc.text(`Total GST:`, 400, finalY + yOffset);
-    doc.text(formatCurrency(invoice.totalIgst || (invoice.totalCgst + invoice.totalSgst)), 550, finalY + yOffset, { align: 'right' });
-
-    yOffset += 12;
-    doc.text(`Round Off:`, 400, finalY + yOffset);
-    doc.text(`${invoice.roundOff > 0 ? '+' : ''}${invoice.roundOff.toFixed(2)}`, 550, finalY + yOffset, { align: 'right' });
-
-    yOffset += 12;
-    doc.setFontSize(11);
-    doc.rect(395, finalY + yOffset, 160, 25);
-    doc.text(`BILL TOTAL:`, 400, finalY + yOffset + 17);
-    doc.text(formatCurrency(invoice.grandTotal), 550, finalY + yOffset + 17, { align: 'right' });
-
-    // Amount in Words
-    doc.setFontSize(8);
-    doc.setFont('helvetica', 'bolditalic');
-    doc.text(`Amount in Words: ${numberToWords(invoice.grandTotal)}`, 40, finalY + yOffset + 40);
-
-    // Bank Details & T&C
-    doc.setFontSize(8);
-    doc.setFont('helvetica', 'bold');
-    doc.text("BANK DETAILS:", 40, finalY + yOffset + 60);
-    doc.setFont('helvetica', 'normal');
-    if (companyBankName) doc.text(`Bank: ${companyBankName} | A/c: ${companyAccountNumber}`, 40, finalY + yOffset + 72);
-    if (companyIfsc) doc.text(`IFSC: ${companyIfsc} | Branch: ${companyBranch}`, 40, finalY + yOffset + 84);
-
-    doc.setFont('helvetica', 'bold');
-    doc.text("TERMS & CONDITIONS:", 40, finalY + yOffset + 105);
-    doc.setFontSize(6);
-    TERMS.forEach((t, i) => doc.text(`${i+1}. ${t}`, 40, finalY + yOffset + 115 + (i * 8)));
-
-    // Signatures
-    doc.line(40, finalY + yOffset + 180, 150, finalY + yOffset + 180);
-    doc.text("Receiver Signature", 40, finalY + yOffset + 192);
-
-    doc.setFontSize(8);
-    doc.text(`For ${companyName.toUpperCase()}`, 400, finalY + yOffset + 170);
-    doc.line(400, finalY + yOffset + 180, 555, finalY + yOffset + 180);
-    doc.text("Authorised Signatory", 400, finalY + yOffset + 192);
-
+    generateInvoicePDFPage(doc, invoice, company || null);
     doc.save(`Invoice_${invoice.invoiceNumber.replace(/\//g, '_')}.pdf`);
   };
+
 
   if (isInvLoading || isSettingsLoading) {
     return (
