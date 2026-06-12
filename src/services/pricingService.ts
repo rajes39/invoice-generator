@@ -15,12 +15,18 @@ export interface CustomerNetRate {
   netRate: number;
 }
 
+export interface CustomerCategoryDiscount {
+  id: string;
+  customerId: string;
+  category: string;
+  discountPercent: number;
+}
+
 export async function fetchCustomerDiscounts(customerId: string): Promise<CustomerDiscount[]> {
   const { data, error } = await supabase
-    .from('discount_settings')
+    .from('customer_discounts')
     .select('*')
-    .eq('reference_id', customerId)
-    .eq('is_active', true);
+    .eq('customer_id', customerId);
 
   if (error) {
     console.error('Error fetching customer discounts:', error);
@@ -29,9 +35,47 @@ export async function fetchCustomerDiscounts(customerId: string): Promise<Custom
 
   return (data || []).map(row => ({
     id: row.id,
-    customerId: row.reference_id,
+    customerId: row.customer_id,
     type: row.type as 'BRAND' | 'PRODUCT',
-    target: row.data?.target || '',
+    target: row.target || '',
+    discountPercent: row.discount_percent,
+  }));
+}
+
+export async function fetchCustomerNetRates(customerId: string): Promise<CustomerNetRate[]> {
+  const { data, error } = await supabase
+    .from('customer_net_rates')
+    .select('*')
+    .eq('customer_id', customerId);
+
+  if (error) {
+    console.error('Error fetching customer net rates:', error);
+    return [];
+  }
+
+  return (data || []).map(row => ({
+    id: row.id,
+    customerId: row.customer_id,
+    productId: row.product_id,
+    netRate: row.net_rate,
+  }));
+}
+
+export async function fetchCustomerCategoryDiscounts(customerId: string): Promise<CustomerCategoryDiscount[]> {
+  const { data, error } = await supabase
+    .from('customer_category_discounts')
+    .select('*')
+    .eq('customer_id', customerId);
+
+  if (error) {
+    console.error('Error fetching customer category discounts:', error);
+    return [];
+  }
+
+  return (data || []).map(row => ({
+    id: row.id,
+    customerId: row.customer_id,
+    category: row.category,
     discountPercent: row.discount_percent,
   }));
 }
@@ -42,34 +86,32 @@ export async function saveCustomerDiscount(discount: Omit<CustomerDiscount, 'id'
 
   // First, check if a rule for this target already exists and delete it to "upsert"
   await supabase
-    .from('discount_settings')
+    .from('customer_discounts')
     .delete()
-    .eq('reference_id', discount.customerId)
+    .eq('customer_id', discount.customerId)
     .eq('type', discount.type)
-    .filter('data->>target', 'eq', discount.target);
+    .eq('target', discount.target);
 
   const payload = {
-    id: crypto.randomUUID(),
     user_id: userId,
     type: discount.type,
-    reference_id: discount.customerId,
+    customer_id: discount.customerId,
     discount_percent: discount.discountPercent,
-    is_active: true,
-    data: { target: discount.target },
+    target: discount.target,
     created_at: new Date().toISOString(),
   };
 
-  const { error } = await supabase.from('discount_settings').insert([payload]);
+  const { error } = await supabase.from('customer_discounts').insert([payload]);
   if (error) throw error;
 }
 
 export async function deleteCustomerDiscountByTarget(customerId: string, type: 'BRAND' | 'PRODUCT', target: string): Promise<void> {
   const { error } = await supabase
-    .from('discount_settings')
+    .from('customer_discounts')
     .delete()
-    .eq('reference_id', customerId)
+    .eq('customer_id', customerId)
     .eq('type', type)
-    .filter('data->>target', 'eq', target);
+    .eq('target', target);
   if (error) throw error;
 }
 
@@ -79,29 +121,26 @@ export async function saveCustomerNetRate(rate: Omit<CustomerNetRate, 'id'>): Pr
 
   // Delete existing to upsert
   await supabase
-    .from('customer_product_net_rates')
+    .from('customer_net_rates')
     .delete()
     .eq('customer_id', rate.customerId)
     .eq('product_id', rate.productId);
 
   const payload = {
-    id: crypto.randomUUID(),
     user_id: userId,
     customer_id: rate.customerId,
     product_id: rate.productId,
     net_rate: rate.netRate,
     created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-    data: {},
   };
 
-  const { error } = await supabase.from('customer_product_net_rates').insert([payload]);
+  const { error } = await supabase.from('customer_net_rates').insert([payload]);
   if (error) throw error;
 }
 
 export async function deleteCustomerNetRate(customerId: string, productId: string): Promise<void> {
   const { error } = await supabase
-    .from('customer_product_net_rates')
+    .from('customer_net_rates')
     .delete()
     .eq('customer_id', customerId)
     .eq('product_id', productId);
@@ -110,9 +149,10 @@ export async function deleteCustomerNetRate(customerId: string, productId: strin
 
 const pricingService = {
   fetchCustomerDiscounts,
+  fetchCustomerNetRates,
+  fetchCustomerCategoryDiscounts,
   saveCustomerDiscount,
   deleteCustomerDiscountByTarget,
-  fetchCustomerNetRates,
   saveCustomerNetRate,
   deleteCustomerNetRate,
 };

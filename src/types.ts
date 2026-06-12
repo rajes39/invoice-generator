@@ -50,8 +50,8 @@ export interface Product {
 export interface PricingRule {
   id: string;
   customerId: string;
-  type: 'BRAND_DISCOUNT' | 'PRODUCT_DISCOUNT' | 'PRODUCT_NET_RATE';
-  target: string; // Brand Name or Product ID
+  type: 'BRAND_DISCOUNT' | 'PRODUCT_DISCOUNT' | 'PRODUCT_NET_RATE' | 'CATEGORY_DISCOUNT';
+  target: string; // Brand Name or Product ID or Category Name
   value: number; // Discount % or Net Rate Amount
 }
 
@@ -133,6 +133,13 @@ export interface CustomerNetRate {
   productId: string;
   netRate: number;
   productName?: string;
+}
+
+export interface CustomerCategoryDiscount {
+  id: string;
+  customerId: string;
+  category: string;
+  discountPercent: number;
 }
 
 export interface CustomerDiscountRule {

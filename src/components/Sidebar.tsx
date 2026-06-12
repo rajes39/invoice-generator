@@ -119,20 +119,20 @@ export default function Sidebar() {
               </div>
             </div>
           ))}
-        </nav>
 
-        <div className="pt-4 border-t border-green-800">
-          <button
-            type="button"
-            onClick={async () => {
-              await signOut();
-              navigate('/login');
-            }}
-            className="w-full rounded-2xl bg-green-600 px-4 py-3 text-xs font-black uppercase tracking-widest text-white transition hover:bg-green-500 active:scale-95"
-          >
-            Logout Portal
-          </button>
-        </div>
+          <div className="pt-4 border-t border-green-800">
+            <button
+              type="button"
+              onClick={async () => {
+                await signOut();
+                navigate('/login');
+              }}
+              className="w-full rounded-2xl bg-green-600 px-4 py-3 text-xs font-black uppercase tracking-widest text-white transition hover:bg-green-500 active:scale-95"
+            >
+              Logout Portal
+            </button>
+          </div>
+        </nav>
       </div>
     </aside>
   );

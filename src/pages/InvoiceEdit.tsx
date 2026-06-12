@@ -129,9 +129,10 @@ export default function InvoiceEdit() {
       }
 
       try {
-        const [discountsRes, netRatesRes] = await Promise.all([
+        const [discountsRes, netRatesRes, categoryDiscountsRes] = await Promise.all([
           supabase.from('customer_discounts').select('*').eq('customer_id', selectedCustomerId),
-          supabase.from('customer_net_rates').select('*').eq('customer_id', selectedCustomerId)
+          supabase.from('customer_net_rates').select('*').eq('customer_id', selectedCustomerId),
+          supabase.from('customer_category_discounts').select('*').eq('customer_id', selectedCustomerId)
         ]);
 
         const mappedRules: PricingRule[] = [
@@ -148,6 +149,13 @@ export default function InvoiceEdit() {
             type: 'PRODUCT_NET_RATE' as const,
             target: n.product_id,
             value: n.net_rate
+          })),
+          ...(categoryDiscountsRes.data || []).map(c => ({
+            id: c.id,
+            customerId: c.customer_id,
+            type: 'CATEGORY_DISCOUNT' as const,
+            target: c.category,
+            value: c.discount_percent
           }))
         ];
 
@@ -175,6 +183,16 @@ export default function InvoiceEdit() {
     }
   }, [selectedCustomer, useSeparateDelivery]);
 
+  // Auto-populate discount when product or customer changes
+  useEffect(() => {
+    if (selectedProduct && selectedCustomerId) {
+      const pricing = getEffectivePricing(selectedProduct, selectedCustomerId);
+      setDiscPercentInput(pricing.discPercent);
+    } else {
+      setDiscPercentInput(0);
+    }
+  }, [selectedProduct, selectedCustomerId, rules]);
+
   const getEffectivePricing = (product: Product, customerId: string) => {
     const customerRules = rules.filter(r => r.customerId === customerId);
     const mrp = product.mrp || 0;
@@ -188,6 +206,9 @@ export default function InvoiceEdit() {
 
     const brandDiscRule = customerRules.find(r => r.type === 'BRAND_DISCOUNT' && r.target === product.brand);
     if (brandDiscRule) return { effectivePrice: mrp * (1 - brandDiscRule.value / 100), discPercent: brandDiscRule.value, isNet: false };
+
+    const catDiscRule = customerRules.find(r => r.type === 'CATEGORY_DISCOUNT' && r.target === product.category);
+    if (catDiscRule) return { effectivePrice: mrp * (1 - catDiscRule.value / 100), discPercent: catDiscRule.value, isNet: false };
 
     return { effectivePrice: mrp, discPercent: 0, isNet: false };
   };

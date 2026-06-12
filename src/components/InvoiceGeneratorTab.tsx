@@ -1,5 +1,5 @@
 import { useState, useEffect, Dispatch, SetStateAction, FormEvent } from 'react';
-import { Customer, Product, Invoice, InvoiceItem, BusinessProfile, CustomerDiscountRule, CustomerDiscount, CustomerNetRate } from '../types';
+import { Customer, Product, Invoice, InvoiceItem, BusinessProfile, CustomerDiscountRule, CustomerDiscount, CustomerNetRate, CustomerCategoryDiscount } from '../types';
 import { Plus, Trash, UserPlus, FileText, Calendar, Percent, IndianRupee, AlertTriangle, Check, ChevronDown, Sparkles } from 'lucide-react';
 import { INDIAN_STATES } from './CustomersTab';
 import supabase from '../supabase';
@@ -118,6 +118,7 @@ export function InvoiceGeneratorTab({
   const [vehicleNo, setVehicleNo] = useState('');
   const [customerDiscounts, setCustomerDiscounts] = useState<CustomerDiscount[]>([]);
   const [customerNetRates, setCustomerNetRates] = useState<CustomerNetRate[]>([]);
+  const [customerCategoryDiscounts, setCustomerCategoryDiscounts] = useState<CustomerCategoryDiscount[]>([]);
   const [legacyDiscountRules, setLegacyDiscountRules] = useState<CustomerDiscountRule[]>([]);
   const [selectedCustomerId, setSelectedCustomerId] = useState('');
 
@@ -137,21 +138,25 @@ export function InvoiceGeneratorTab({
     if (!selectedCustomerId) {
       setCustomerDiscounts([]);
       setCustomerNetRates([]);
+      setCustomerCategoryDiscounts([]);
       return;
     }
 
     (async () => {
       try {
-        const [discounts, netRates] = await Promise.all([
+        const [discounts, netRates, categoryDiscounts] = await Promise.all([
           pricingService.fetchCustomerDiscounts(selectedCustomerId),
-          pricingService.fetchCustomerNetRates(selectedCustomerId)
+          pricingService.fetchCustomerNetRates(selectedCustomerId),
+          pricingService.fetchCustomerCategoryDiscounts(selectedCustomerId)
         ]);
         setCustomerDiscounts(discounts);
         setCustomerNetRates(netRates);
+        setCustomerCategoryDiscounts(categoryDiscounts);
       } catch (err) {
         console.error('Failed to load customer pricing rules', err);
         setCustomerDiscounts([]);
         setCustomerNetRates([]);
+        setCustomerCategoryDiscounts([]);
       }
     })();
   }, [selectedCustomerId]);
@@ -195,6 +200,11 @@ export function InvoiceGeneratorTab({
         const brandRule = customerDiscounts.find(d => d.type === 'BRAND' && d.target.toLowerCase().trim() === prod.brand.toLowerCase().trim());
         if (brandRule) return brandRule.discountPercent;
       }
+    }
+
+    if (customerCategoryDiscounts.length > 0 && prod.category) {
+      const catRule = customerCategoryDiscounts.find(d => d.category.toLowerCase().trim() === prod.category.toLowerCase().trim());
+      if (catRule) return catRule.discountPercent;
     }
 
     if (legacyDiscountRules?.length) {
@@ -264,7 +274,7 @@ export function InvoiceGeneratorTab({
         ...applyCustomerPricing(item, prod, selectedCustomerId),
       };
     }));
-  }, [selectedCustomerId, products, customerDiscounts, customerNetRates]);
+  }, [selectedCustomerId, products, customerDiscounts, customerNetRates, customerCategoryDiscounts]);
 
   // 4. Update row values on product selection or custom inputs
   const handleItemProductSelect = (index: number, productId: string) => {

@@ -35,6 +35,12 @@ function PlaceholderPage({ title, description }: { title: string; description: s
   );
 }
 
+import GRN from '../pages/GRN';
+import PurchaseOrders from '../pages/PurchaseOrders';
+import Stock from '../pages/Stock';
+import InventoryMovements from '../pages/InventoryMovements';
+import SalesPayments from '../pages/SalesPayments';
+
 export default function AppRoutes() {
   return (
     <Routes>
@@ -116,7 +122,7 @@ export default function AppRoutes() {
         path="/purchase/orders"
         element={
           <ProtectedRoute>
-            <PlaceholderPage title="Purchase Orders" description="Create and track purchase orders from suppliers." />
+            <PurchaseOrders />
           </ProtectedRoute>
         }
       />
@@ -124,7 +130,7 @@ export default function AppRoutes() {
         path="/purchase/grn"
         element={
           <ProtectedRoute>
-            <PlaceholderPage title="Goods Receipt" description="Record goods receipt notes against purchase orders." />
+            <GRN />
           </ProtectedRoute>
         }
       />
@@ -204,7 +210,7 @@ export default function AppRoutes() {
         path="/sales/payments"
         element={
           <ProtectedRoute>
-            <PlaceholderPage title="Sales Payments" description="Record payments received against invoices." />
+            <SalesPayments />
           </ProtectedRoute>
         }
       />
@@ -220,7 +226,7 @@ export default function AppRoutes() {
         path="/inventory/stock"
         element={
           <ProtectedRoute>
-            <PlaceholderPage title="Stock" description="View current stock levels by warehouse and product." />
+            <Stock />
           </ProtectedRoute>
         }
       />
@@ -228,7 +234,7 @@ export default function AppRoutes() {
         path="/inventory/movements"
         element={
           <ProtectedRoute>
-            <PlaceholderPage title="Inventory Movements" description="Browse stock ledger entries and inventory transactions." />
+            <InventoryMovements />
           </ProtectedRoute>
         }
       />

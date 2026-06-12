@@ -6,22 +6,27 @@ import { Bell, AlertTriangle, CheckCircle, Clock } from 'lucide-react';
 import type { Invoice, Product } from '../types';
 
 async function fetchDashboardMetrics() {
+  const { data: { session } } = await supabase.auth.getSession();
+  const userId = session?.user?.id;
+
   const [
     { data: invoices }, 
-    { data: customers }, 
+    { count: totalCustomers }, 
+    { count: totalProducts },
     { data: products },
     { data: notifications }
   ] = await Promise.all([
-    supabase.from('invoices').select('id,grand_total,total_cgst,total_sgst,total_igst,status'),
-    supabase.from('customers').select('id', { count: 'exact' }),
-    supabase.from('products').select('id,stock,reorder_level'),
+    supabase.from('invoices').select('id,invoice_no,customer_name,date,grand_total,total_cgst,total_sgst,total_igst,status').eq('user_id', userId),
+    supabase.from('customers').select('*', { count: 'exact', head: true }).eq('user_id', userId),
+    supabase.from('products').select('*', { count: 'exact', head: true }).eq('user_id', userId),
+    supabase.from('products').select('id,stock,reorder_level').eq('user_id', userId),
     notificationService.fetchNotifications()
   ]);
 
   return {
     invoices: invoices ?? [],
-    totalCustomers: customers?.length ?? 0,
-    totalProducts: products?.length ?? 0,
+    totalCustomers: totalCustomers ?? 0,
+    totalProducts: totalProducts ?? 0,
     products: products ?? [],
     notifications: notifications ?? []
   };
