@@ -125,21 +125,21 @@ export default function InvoiceCreate() {
             customerId: d.customer_id,
             type: (d.type === 'BRAND' ? 'BRAND_DISCOUNT' : 'PRODUCT_DISCOUNT') as any,
             target: d.target,
-            value: d.discount_percent
+            value: Number(d.discount_percent)
           })),
           ...(netRatesRes.data || []).map(n => ({
             id: n.id,
             customerId: n.customer_id,
             type: 'PRODUCT_NET_RATE' as const,
             target: n.product_id,
-            value: n.net_rate
+            value: Number(n.net_rate)
           })),
           ...(categoryDiscountsRes.data || []).map(c => ({
             id: c.id,
             customerId: c.customer_id,
             type: 'CATEGORY_DISCOUNT' as const,
             target: c.category,
-            value: c.discount_percent
+            value: Number(c.discount_percent)
           }))
         ];
 
@@ -179,33 +179,95 @@ export default function InvoiceCreate() {
 
   const getEffectivePricing = (product: Product, customerId: string, qty: number) => {
     const customerRules = rules.filter(r => r.customerId === customerId);
-    const mrp = product.mrp || 0;
+    const mrp = Number(product.mrp || 0);
     
     // 1. Scheme Priority
     const productSchemes = schemes.filter(s => s.product_id === product.id && qty >= s.min_qty);
     if (productSchemes.length > 0) {
-      // Find the scheme with the highest min_qty that is still <= current qty
-      const bestScheme = productSchemes.reduce((prev, curr) => (curr.min_qty > prev.min_qty ? curr : prev));
-      return { effectivePrice: bestScheme.scheme_price, discPercent: 0, isNet: true, ruleName: 'Scheme Applied' };
+      const bestScheme = productSchemes.reduce((prev, curr) => (Number(curr.min_qty) > Number(prev.min_qty) ? curr : prev));
+      const rate = Number(bestScheme.scheme_price);
+      const discPercent = mrp > 0 ? ((mrp - rate) / mrp * 100) : 0;
+      return { 
+        effectivePrice: rate, 
+        discPercent: Number(discPercent.toFixed(2)), 
+        isNet: true, 
+        ruleName: `🎁 Scheme: ₹${rate}`,
+        badgeColor: 'bg-emerald-50 text-emerald-600 border-emerald-100'
+      };
     }
 
     // 2. Net Rate Priority
     const netRateRule = customerRules.find(r => r.type === 'PRODUCT_NET_RATE' && r.target === product.id);
-    if (netRateRule) return { effectivePrice: netRateRule.value, discPercent: 0, isNet: true, ruleName: 'Net Rate' };
+    if (netRateRule) {
+      const rate = Number(netRateRule.value);
+      const discPercent = mrp > 0 ? ((mrp - rate) / mrp * 100) : 0;
+      return { 
+        effectivePrice: rate, 
+        discPercent: Number(discPercent.toFixed(2)), 
+        isNet: true, 
+        ruleName: '💰 Net Rate Applied',
+        badgeColor: 'bg-blue-50 text-blue-600 border-blue-100'
+      };
+    }
 
     // 3. Product Discount
-    const prodDiscRule = customerRules.find(r => r.type === 'PRODUCT_DISCOUNT' && r.target === product.id);
-    if (prodDiscRule) return { effectivePrice: mrp * (1 - prodDiscRule.value / 100), discPercent: prodDiscRule.value, isNet: false, ruleName: `${prodDiscRule.value}% Product Disc` };
+    const prodDiscRule = customerRules.find(r => 
+      r.type === 'PRODUCT_DISCOUNT' && 
+      (r.target === product.id || r.target === product.partNo || r.target === (product as any).sku)
+    );
+    if (prodDiscRule) {
+      const disc = Number(prodDiscRule.value);
+      const rate = mrp * (1 - disc / 100);
+      return { 
+        effectivePrice: rate, 
+        discPercent: disc, 
+        isNet: false, 
+        ruleName: `🏷️ Product Disc: ${disc}%`,
+        badgeColor: 'bg-indigo-50 text-indigo-600 border-indigo-100'
+      };
+    }
 
     // 4. Brand Discount
-    const brandDiscRule = customerRules.find(r => r.type === 'BRAND_DISCOUNT' && r.target === product.brand);
-    if (brandDiscRule) return { effectivePrice: mrp * (1 - brandDiscRule.value / 100), discPercent: brandDiscRule.value, isNet: false, ruleName: `${brandDiscRule.value}% Brand Disc` };
+    const brandDiscRule = customerRules.find(r => 
+      r.type === 'BRAND_DISCOUNT' && 
+      r.target?.toLowerCase().trim() === (product.brand || (product as any).data?.brand || '')?.toLowerCase().trim()
+    );
+    if (brandDiscRule) {
+      const disc = Number(brandDiscRule.value);
+      const rate = mrp * (1 - disc / 100);
+      return { 
+        effectivePrice: rate, 
+        discPercent: disc, 
+        isNet: false, 
+        ruleName: `🏷️ Brand Disc: ${disc}%`,
+        badgeColor: 'bg-amber-50 text-amber-600 border-amber-100'
+      };
+    }
 
     // 5. Category Discount
-    const catDiscRule = customerRules.find(r => r.type === 'CATEGORY_DISCOUNT' && r.target === product.category);
-    if (catDiscRule) return { effectivePrice: mrp * (1 - catDiscRule.value / 100), discPercent: catDiscRule.value, isNet: false, ruleName: `${catDiscRule.value}% Category Disc` };
+    const catDiscRule = customerRules.find(r => 
+      r.type === 'CATEGORY_DISCOUNT' && 
+      r.target?.toLowerCase().trim() === (product.category || (product as any).data?.category || '')?.toLowerCase().trim()
+    );
+    if (catDiscRule) {
+      const disc = Number(catDiscRule.value);
+      const rate = mrp * (1 - disc / 100);
+      return { 
+        effectivePrice: rate, 
+        discPercent: disc, 
+        isNet: false, 
+        ruleName: `🏷️ Category Disc: ${disc}%`,
+        badgeColor: 'bg-purple-50 text-purple-600 border-purple-100'
+      };
+    }
 
-    return { effectivePrice: mrp, discPercent: 0, isNet: false, ruleName: 'MRP' };
+    return { 
+      effectivePrice: mrp, 
+      discPercent: 0, 
+      isNet: false, 
+      ruleName: '',
+      badgeColor: ''
+    };
   };
 
   const addLine = () => {
@@ -216,18 +278,24 @@ export default function InvoiceCreate() {
     
     const qty = Number(qtyInput);
     const pricing = getEffectivePricing(selectedProduct, selectedCustomerId, qty);
-    const discP = discPercentInput !== '' ? discPercentInput : pricing.discPercent;
     
-    const mrp = selectedProduct.mrp || 0;
-    const gstRate = selectedProduct.gstRate || 0;
+    // If user manually changed discPercentInput, use that, otherwise use auto-calculated
+    const discP = (discPercentInput !== '' && discPercentInput !== 0) ? discPercentInput : pricing.discPercent;
+    
+    const mrp = Number(selectedProduct.mrp || 0);
+    const gstRate = Number(selectedProduct.gstRate || 0);
     
     // -- Calculation Engine --
-    const effectiveRate = discP > 0 ? (mrp * (1 - discP / 100)) : pricing.effectivePrice;
-    const taxableAmt = Math.round((effectiveRate * qty) * 100) / 100;
-    const gstTax = Math.round((taxableAmt * gstRate / 100) * 100) / 100;
-    const lineTotal = Math.round((taxableAmt + gstTax) * 100) / 100;
+    // If manual discount is provided, recalculate rate from MRP
+    const effectiveRate = (discPercentInput !== '' && discPercentInput !== 0) 
+      ? (mrp * (1 - discP / 100)) 
+      : pricing.effectivePrice;
+
+    const taxableAmt = (effectiveRate * qty);
+    const gstTax = (taxableAmt * gstRate / 100);
+    const lineTotal = (taxableAmt + gstTax);
     const basicRate = calculateBasicRate(effectiveRate, gstRate);
-    const discAmount = Math.round((mrp * qty - taxableAmt) * 100) / 100;
+    const discAmount = (mrp * qty - taxableAmt);
 
     const newLine = {
       productId: selectedProduct.id,
@@ -239,13 +307,14 @@ export default function InvoiceCreate() {
       effectivePrice: effectiveRate,
       discountPercent: discP,
       discountAmount: discAmount,
-      isNetRate: pricing.isNet || discP === 0,
+      isNetRate: pricing.isNet,
       gstRate,
       basicRatePerUnit: basicRate,
       basicAmount: taxableAmt,
       gstAmount: gstTax,
       lineTotal,
-      ruleName: pricing.ruleName
+      ruleName: pricing.ruleName,
+      badgeColor: pricing.badgeColor
     };
 
     setLines([...lines, newLine]);
@@ -267,11 +336,11 @@ export default function InvoiceCreate() {
     const goodsGst = lines.reduce((sum, l) => sum + (l.gstAmount || 0), 0);
     
     const fCharges = Number(freightCharges || 0);
-    const fGst = Math.round((fCharges * 0.18) * 100) / 100;
+    const fGst = (fCharges * 0.18);
     
     const rawTotal = taxable + goodsGst + fCharges + fGst;
     const finalTotal = Math.round(rawTotal);
-    const roundOff = Math.round((finalTotal - rawTotal) * 100) / 100;
+    const roundOff = (finalTotal - rawTotal);
 
     return {
       totalMrp,
@@ -572,7 +641,7 @@ export default function InvoiceCreate() {
                           <div className="flex items-center gap-2">
                             <span className="text-[10px] font-medium text-slate-400">{l.partNo}</span>
                             {(l as any).ruleName && (
-                              <span className="bg-indigo-50 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400 px-1.5 py-0.5 rounded text-[8px] font-black uppercase border border-indigo-100 dark:border-indigo-800">
+                              <span className={`px-1.5 py-0.5 rounded text-[8px] font-black uppercase border ${(l as any).badgeColor || 'bg-indigo-50 text-indigo-600 border-indigo-100 dark:bg-indigo-900/30 dark:text-indigo-400 dark:border-indigo-800'}`}>
                                 {(l as any).ruleName}
                               </span>
                             )}

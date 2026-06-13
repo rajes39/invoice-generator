@@ -5,18 +5,20 @@ import toast from 'react-hot-toast';
 import { 
   Calculator, 
   CreditCard, 
+  Info, 
   Loader, 
+  MapPin, 
   Plus, 
-  Trash2,
-  ArrowLeft,
-  Search,
-  CheckCircle2
+  Trash2 
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { SearchableDropdown } from '../components/SearchableDropdown';
-import { fetchInvoices } from '../services/invoiceService';
-import { createCreditNote } from '../services/creditNoteService';
-import type { Invoice, Customer, CreditNoteItem, CreditNote } from '../types';
+import { 
+  calculateBasicRate, 
+  numberToWords,
+  getFinancialYear 
+} from '../services/invoiceService';
+import type { Product, Customer, InvoiceItem, Invoice, PricingRule, CompanySettings } from '../types';
 
 export default function CreditNoteCreate() {
   const queryClient = useQueryClient();
@@ -24,14 +26,52 @@ export default function CreditNoteCreate() {
   
   // -- Form State --
   const [selectedCustomerId, setSelectedCustomerId] = useState('');
-  const [selectedInvoiceId, setSelectedInvoiceId] = useState('');
-  const [reason, setReason] = useState('Goods Returned');
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [originalInvoiceId, setOriginalInvoiceId] = useState('');
+  const [originalInvoices, setOriginalInvoices] = useState<any[]>([]);
+  const [selectedProductId, setSelectedProductId] = useState('');
+  const [qtyInput, setQtyInput] = useState<number | ''>(1);
+  const [discPercentInput, setDiscPercentInput] = useState<number | ''>(0);
+  const [isDiscManual, setIsDiscManual] = useState(false);
   
-  const [returnItems, setReturnItems] = useState<any[]>([]);
+  const [lines, setLines] = useState<Omit<InvoiceItem, 'id' | 'invoiceId' | 'createdAt'>[]>([]);
+  const [status, setStatus] = useState<'Draft' | 'Active'>('Active');
+  
+  // -- Meta Info --
+  const [orderNo, setOrderNo] = useState('');
+  const [remark, setRemark] = useState('');
+  const [freightCharges, setFreightCharges] = useState<number>(0);
+  const [invoiceDate, setInvoiceDate] = useState(new Date().toISOString().slice(0, 16));
+  
+  // -- Delivery Address --
+  const [useSeparateDelivery, setUseSeparateDelivery] = useState(false);
+  const [deliveryAddress, setDeliveryAddress] = useState({
+    address: '',
+    city: '',
+    state: '',
+    stateCode: '',
+    pincode: ''
+  });
+
   const [isSaving, setIsSaving] = useState(false);
+  const [rules, setRules] = useState<PricingRule[]>([]);
+  const [schemes, setSchemes] = useState<any[]>([]);
 
   // -- Data Fetching --
+  const { data: products = [] } = useQuery<Product[]>({
+    queryKey: ['products'],
+    queryFn: async () => {
+      const { data } = await supabase.from('products').select('*').order('name');
+      return (data ?? []).map(p => ({
+        ...p,
+        hsnCode: p.hsn_code || '',
+        gstRate: Number(p.gst_rate || 0),
+        mrp: Number(p.mrp || 0),
+        partNo: p.part_no || p.sku || '',
+        brand: p.brand || p.data?.brand || ''
+      }));
+    },
+  });
+
   const { data: customers = [] } = useQuery<Customer[]>({
     queryKey: ['customers'],
     queryFn: async () => {
@@ -40,164 +80,356 @@ export default function CreditNoteCreate() {
     },
   });
 
-  const { data: allInvoices = [] } = useQuery<Invoice[]>({
-    queryKey: ['invoices'],
-    queryFn: fetchInvoices
-  });
-
-  const customerInvoices = useMemo(() => {
-    return allInvoices.filter(inv => inv.customerId === selectedCustomerId);
-  }, [allInvoices, selectedCustomerId]);
-
-  const selectedInvoice = useMemo(() => {
-    return allInvoices.find(inv => inv.id === selectedInvoiceId);
-  }, [allInvoices, selectedInvoiceId]);
-
-  // When invoice changes, reset return items
+  // Fetch this customer's previous invoices
   useEffect(() => {
-    if (selectedInvoice) {
-      setReturnItems(selectedInvoice.items.map(item => ({
-        ...item,
-        returnQty: 0,
-        selected: false
-      })));
-    } else {
-      setReturnItems([]);
-    }
-  }, [selectedInvoice]);
-
-  const toggleItemSelection = (idx: number) => {
-    const newItems = [...returnItems];
-    newItems[idx].selected = !newItems[idx].selected;
-    if (newItems[idx].selected && newItems[idx].returnQty === 0) {
-      newItems[idx].returnQty = newItems[idx].qty;
-    }
-    setReturnItems(newItems);
-  };
-
-  const updateReturnQty = (idx: number, val: number) => {
-    const newItems = [...returnItems];
-    const max = newItems[idx].qty;
-    newItems[idx].returnQty = Math.min(Math.max(0, val), max);
-    if (newItems[idx].returnQty > 0) {
-      newItems[idx].selected = true;
-    }
-    setReturnItems(newItems);
-  };
-
-  // -- Computations --
-  const totals = useMemo(() => {
-    const selectedItems = returnItems.filter(item => item.selected && item.returnQty > 0);
-    
-    let subtotalBasic = 0;
-    let totalCgst = 0;
-    let totalSgst = 0;
-    let totalIgst = 0;
-
-    selectedItems.forEach(item => {
-      const ratio = item.returnQty / item.qty;
-      const taxable = item.basicAmount * ratio;
-      const gst = item.gstAmount * ratio;
-      
-      subtotalBasic += taxable;
-      if (selectedInvoice?.isInterstate) {
-        totalIgst += gst;
-      } else {
-        totalCgst += gst / 2;
-        totalSgst += gst / 2;
+    const fetchCustomerInvoices = async () => {
+      if (!selectedCustomerId) {
+        setOriginalInvoices([]);
+        return;
       }
+      
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.user) return;
+
+      const { data } = await supabase.from('invoices')
+        .select('id, invoice_no, date, grand_total, items')
+        .eq('customer_id', selectedCustomerId)
+        .eq('user_id', session.user.id)
+        .order('created_at', { ascending: false });
+      
+      setOriginalInvoices(data || []);
+    };
+    
+    fetchCustomerInvoices();
+  }, [selectedCustomerId]);
+
+  useEffect(() => {
+    const loadRulesAndSchemes = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.user) return;
+
+      const [schemesRes] = await Promise.all([
+        supabase.from('product_schemes').select('*').eq('user_id', session.user.id).eq('is_active', true)
+      ]);
+      setSchemes(schemesRes.data || []);
+
+      if (!selectedCustomerId) {
+        setRules([]);
+        return;
+      }
+
+      try {
+        const [discountsRes, netRatesRes, categoryDiscountsRes] = await Promise.all([
+          supabase.from('customer_discounts').select('*').eq('customer_id', selectedCustomerId),
+          supabase.from('customer_net_rates').select('*').eq('customer_id', selectedCustomerId),
+          supabase.from('customer_category_discounts').select('*').eq('customer_id', selectedCustomerId)
+        ]);
+
+        const mappedRules: PricingRule[] = [
+          ...(discountsRes.data || []).map(d => ({
+            id: d.id,
+            customerId: d.customer_id,
+            type: (d.type === 'BRAND' ? 'BRAND_DISCOUNT' : 'PRODUCT_DISCOUNT') as any,
+            target: d.target,
+            value: Number(d.discount_percent)
+          })),
+          ...(netRatesRes.data || []).map(n => ({
+            id: n.id,
+            customerId: n.customer_id,
+            type: 'PRODUCT_NET_RATE' as const,
+            target: n.product_id,
+            value: Number(n.net_rate)
+          })),
+          ...(categoryDiscountsRes.data || []).map(c => ({
+            id: c.id,
+            customerId: c.customer_id,
+            type: 'CATEGORY_DISCOUNT' as const,
+            target: c.category,
+            value: Number(c.discount_percent)
+          }))
+        ];
+
+        setRules(mappedRules);
+      } catch (err) {
+        console.error('Failed to load pricing rules:', err);
+      }
+    };
+    loadRulesAndSchemes();
+  }, [selectedCustomerId]);
+
+  const selectedCustomer = customers.find((c) => c.id === selectedCustomerId);
+  const selectedProduct = products.find((p) => p.id === selectedProductId);
+
+  // Reset the picked "original invoice" whenever the buyer changes
+  useEffect(() => {
+    setOriginalInvoiceId('');
+  }, [selectedCustomerId]);
+
+  // When the user picks an Original Invoice, pull its line items and
+  // load them as RETURN lines (negative qty / amounts) for this Credit Note.
+  const handleSelectOriginalInvoice = (invoiceId: string) => {
+    setOriginalInvoiceId(invoiceId);
+
+    if (!invoiceId) return;
+
+    const invoice = originalInvoices.find((inv: any) => inv.id === invoiceId);
+    if (!invoice) return;
+
+    const sourceItems: any[] = (invoice as any).items || [];
+    const returnLines = sourceItems.map((item) => {
+      const qty = Math.abs(Number(item.qty || 0));
+      const mrpPerUnit = Number(item.mrpPerUnit ?? item.mrp_per_unit ?? 0);
+      const effectivePrice = Number(item.effectivePrice ?? item.effective_price ?? 0);
+      const gstRate = Number(item.gstRate ?? item.gst_rate ?? 0);
+      const basicAmount = Math.abs(Number(item.basicAmount ?? item.basic_amount ?? 0));
+      const gstAmount = Math.abs(Number(item.gstAmount ?? item.gst_amount ?? 0));
+      const lineTotal = Math.abs(Number(item.lineTotal ?? item.line_total ?? 0));
+      const discountAmount = Math.abs(Number(item.discountAmount ?? item.discount_amount ?? 0));
+
+      return {
+        productId: item.productId ?? item.product_id,
+        productName: item.productName ?? item.product_name,
+        partNo: item.partNo ?? item.part_no ?? '',
+        hsnCode: item.hsnCode ?? item.hsn_code ?? '',
+        qty: -qty,
+        mrpPerUnit,
+        effectivePrice,
+        discountPercent: Number(item.discountPercent ?? item.discount_percent ?? 0),
+        discountAmount: -discountAmount,
+        isNetRate: !!(item.isNetRate ?? item.is_net_rate),
+        gstRate,
+        basicRatePerUnit: Number(item.basicRatePerUnit ?? item.basic_rate_per_unit ?? 0),
+        basicAmount: -basicAmount,
+        gstAmount: -gstAmount,
+        lineTotal: -lineTotal,
+        ruleName: '↩️ Return',
+        badgeColor: 'bg-rose-50 text-rose-600 border-rose-100'
+      };
     });
 
-    const rawTotal = subtotalBasic + totalCgst + totalSgst + totalIgst;
+    setLines(returnLines as any);
+    toast.success(`Loaded ${returnLines.length} item(s) from invoice ${invoice.invoice_no} as return`);
+  };
+
+  // Sync delivery address if "Same as buyer"
+  useEffect(() => {
+    if (!useSeparateDelivery && selectedCustomer) {
+      setDeliveryAddress({
+        address: selectedCustomer.address || '',
+        city: selectedCustomer.city || '',
+        state: selectedCustomer.state || '',
+        stateCode: selectedCustomer.stateCode || '',
+        pincode: (selectedCustomer as any).pincode || ''
+      });
+    }
+  }, [selectedCustomer, useSeparateDelivery]);
+
+  // Auto-populate discount when product or customer changes
+  useEffect(() => {
+    if (selectedProduct && selectedCustomerId) {
+      const pricing = getEffectivePricing(selectedProduct, selectedCustomerId, Number(qtyInput || 0));
+      setDiscPercentInput(pricing.discPercent);
+      setIsDiscManual(false);
+    } else {
+      setDiscPercentInput(0);
+      setIsDiscManual(false);
+    }
+  }, [selectedProduct, selectedCustomerId, qtyInput, rules, schemes]);
+
+  const getEffectivePricing = (product: Product, customerId: string, qty: number) => {
+    const customerRules = rules.filter(r => r.customerId === customerId);
+    const mrp = Number(product.mrp || 0);
+    
+    const productSchemes = schemes.filter(s => s.product_id === product.id && qty >= s.min_qty);
+    if (productSchemes.length > 0) {
+      const bestScheme = productSchemes.reduce((prev, curr) => (Number(curr.min_qty) > Number(prev.min_qty) ? curr : prev));
+      const rate = Number(bestScheme.scheme_price);
+      const discPercent = mrp > 0 ? ((mrp - rate) / mrp * 100) : 0;
+      return { 
+        effectivePrice: rate, 
+        discPercent: Number(discPercent.toFixed(2)), 
+        isNet: true, 
+        ruleName: `🎁 Scheme: ₹${rate}`,
+        badgeColor: 'bg-emerald-50 text-emerald-600 border-emerald-100'
+      };
+    }
+
+    const netRateRule = customerRules.find(r => r.type === 'PRODUCT_NET_RATE' && r.target === product.id);
+    if (netRateRule) {
+      const rate = Number(netRateRule.value);
+      const discPercent = mrp > 0 ? ((mrp - rate) / mrp * 100) : 0;
+      return { 
+        effectivePrice: rate, 
+        discPercent: Number(discPercent.toFixed(2)), 
+        isNet: true, 
+        ruleName: '💰 Net Rate Applied',
+        badgeColor: 'bg-blue-50 text-blue-600 border-blue-100'
+      };
+    }
+
+    const prodDiscRule = customerRules.find(r => r.type === 'PRODUCT_DISCOUNT' && r.target === product.id);
+    if (prodDiscRule) {
+      const disc = Number(prodDiscRule.value);
+      const rate = mrp * (1 - disc / 100);
+      return { 
+        effectivePrice: rate, 
+        discPercent: disc, 
+        isNet: false, 
+        ruleName: `🏷️ Product Disc: ${disc}%`,
+        badgeColor: 'bg-indigo-50 text-indigo-600 border-indigo-100'
+      };
+    }
+
+    const brandDiscRule = customerRules.find(r => r.type === 'BRAND_DISCOUNT' && r.target?.toLowerCase() === product.brand?.toLowerCase());
+    if (brandDiscRule) {
+      const disc = Number(brandDiscRule.value);
+      const rate = mrp * (1 - disc / 100);
+      return { 
+        effectivePrice: rate, 
+        discPercent: disc, 
+        isNet: false, 
+        ruleName: `🏷️ Brand Disc: ${disc}%`,
+        badgeColor: 'bg-amber-50 text-amber-600 border-amber-100'
+      };
+    }
+
+    return { 
+      effectivePrice: mrp, 
+      discPercent: 0, 
+      isNet: false, 
+      ruleName: '',
+      badgeColor: ''
+    };
+  };
+
+  const addLine = () => {
+    if (!selectedProduct || !selectedCustomerId || !qtyInput) return;
+    
+    const qty = Number(qtyInput);
+    const pricing = getEffectivePricing(selectedProduct, selectedCustomerId, qty);
+    
+    const mrp = Number(selectedProduct.mrp || 0);
+    const gstRate = Number(selectedProduct.gstRate || 0);
+    
+    let effectiveRate = isDiscManual ? mrp * (1 - Number(discPercentInput) / 100) : pricing.effectivePrice;
+    let discP = isDiscManual ? Number(discPercentInput) : pricing.discPercent;
+
+    const taxableAmt = (effectiveRate * qty);
+    const gstTax = (taxableAmt * gstRate / 100);
+    const lineTotal = (taxableAmt + gstTax);
+    const basicRate = calculateBasicRate(effectiveRate, gstRate);
+    const discAmount = (mrp * qty - taxableAmt);
+
+    const newLine = {
+      productId: selectedProduct.id,
+      productName: selectedProduct.name,
+      partNo: selectedProduct.partNo || '',
+      hsnCode: selectedProduct.hsnCode || '',
+      qty,
+      mrpPerUnit: mrp,
+      effectivePrice: effectiveRate,
+      discountPercent: discP,
+      discountAmount: discAmount,
+      isNetRate: pricing.isNet,
+      gstRate,
+      basicRatePerUnit: basicRate,
+      basicAmount: taxableAmt,
+      gstAmount: gstTax,
+      lineTotal,
+      ruleName: isDiscManual ? `✏️ Manual: ${discP}%` : pricing.ruleName,
+      badgeColor: isDiscManual ? 'bg-slate-50 text-slate-600 border-slate-200' : pricing.badgeColor
+    };
+
+    setLines([...lines, newLine]);
+    setSelectedProductId('');
+    setQtyInput(1);
+    setDiscPercentInput(0);
+    setIsDiscManual(false);
+  };
+
+  const removeLine = (idx: number) => {
+    setLines(lines.filter((_, i) => i !== idx));
+  };
+
+  const totals = useMemo(() => {
+    const taxable = lines.reduce((sum, l) => sum + l.basicAmount, 0);
+    const goodsGst = lines.reduce((sum, l) => sum + l.gstAmount, 0);
+    const fCharges = Number(freightCharges || 0);
+    const fGst = (fCharges * 0.18);
+    
+    const rawTotal = taxable + goodsGst + fCharges + fGst;
     const finalTotal = Math.round(rawTotal);
-    const roundOff = Math.round((finalTotal - rawTotal) * 100) / 100;
+    const roundOff = (finalTotal - rawTotal);
 
     return {
-      subtotalBasic: Math.round(subtotalBasic * 100) / 100,
-      totalCgst: Math.round(totalCgst * 100) / 100,
-      totalSgst: Math.round(totalSgst * 100) / 100,
-      totalIgst: Math.round(totalIgst * 100) / 100,
+      taxableAmount: taxable,
+      goodsGst,
+      freightCharges: fCharges,
+      freightGst: fGst,
+      cgst: (goodsGst + fGst) / 2,
+      sgst: (goodsGst + fGst) / 2,
       roundOff,
-      totalAmount: finalTotal
+      billTotal: finalTotal
     };
-  }, [returnItems, selectedInvoice]);
+  }, [lines, freightCharges]);
 
   const saveCreditNote = async () => {
-    const selectedItems = returnItems.filter(item => item.selected && item.returnQty > 0);
-    if (selectedItems.length === 0) {
-      toast.error('Please select at least one item to return');
-      return;
-    }
+    if (!selectedCustomer || lines.length === 0 || isSaving) return;
     
-    if (isSaving) return;
     setIsSaving(true);
-    
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session?.user) throw new Error('Unauthorized');
 
-      const cnItems: CreditNoteItem[] = selectedItems.map(item => {
-        const ratio = item.returnQty / item.qty;
-        return {
-          id: crypto.randomUUID(),
-          creditNoteId: '', // Filled by service
-          productId: item.productId,
-          productName: item.productName,
-          partNo: item.partNo,
-          hsnCode: item.hsnCode,
-          qty: item.returnQty,
-          mrpPerUnit: item.mrpPerUnit,
-          effectivePrice: item.effectivePrice,
-          discountPercent: item.discountPercent,
-          discountAmount: item.discountAmount * ratio,
-          gstRate: item.gstRate,
-          basicAmount: item.basicAmount * ratio,
-          gstAmount: item.gstAmount * ratio,
-          lineTotal: item.lineTotal * ratio
-        };
-      });
+      let { data: settings } = await supabase.from('company_settings').select('*').eq('user_id', session.user.id).maybeSingle();
+      
+      const prefix = 'CN';
+      const rawFY = settings?.financial_year || getFinancialYear(new Date());
+      const fy = rawFY.length > 5 ? rawFY.replace(/^\d{2}/, '') : rawFY;
+      
+      const nextSeq = (Number(settings?.cn_sequence || 0)) + 1;
+      const cnNumber = `${prefix}/${fy}/${String(nextSeq).padStart(4, '0')}`;
 
-      const cnData: Omit<CreditNote, 'id' | 'createdAt' | 'creditNoteNumber'> = {
-        userId: session.user.id,
-        originalInvoiceId: selectedInvoiceId,
-        originalInvoiceNumber: selectedInvoice?.invoiceNumber,
-        customerId: selectedCustomerId,
-        customerName: selectedInvoice?.customerName || '',
-        customerGstin: selectedInvoice?.customerGstin || '',
-        customerPhone: selectedInvoice?.customerPhone || '',
-        customerAddress: selectedInvoice?.customerAddress || '',
-        date,
-        reason,
-        items: cnItems,
-        subtotalBasic: totals.subtotalBasic,
-        totalCgst: totals.totalCgst,
-        totalSgst: totals.totalSgst,
-        totalIgst: totals.totalIgst,
-        roundOff: totals.roundOff,
-        totalAmount: totals.totalAmount,
-        status: 'Applied'
+      const creditNote = {
+        user_id: session.user.id,
+        credit_note_no: cnNumber,
+        original_invoice_id: originalInvoiceId || null,
+        customer_id: selectedCustomer.id,
+        customer_name: selectedCustomer.name,
+        date: invoiceDate.split('T')[0],
+        grand_total: totals.billTotal,
+        status: status === 'Active' ? 'Applied' : 'Draft',
+        items: lines,
+        data: {
+          ...totals,
+          remark,
+          orderNo,
+          deliveryAddress,
+          originalInvoiceId
+        }
       };
 
-      await createCreditNote(cnData);
+      const { data: cnData, error: cnError } = await supabase.from('credit_notes').insert([creditNote]).select().single();
+      if (cnError) throw cnError;
+
+      await supabase.from('company_settings').update({ cn_sequence: nextSeq }).eq('user_id', session.user.id);
       
-      // Update stock (add back returned items)
-      for (const item of cnItems) {
+      for (const item of lines) {
         await supabase.from('stock_ledger').insert([{
           user_id: session.user.id,
           product_id: item.productId,
-          quantity: item.qty, // Positive quantity for return (In)
+          quantity: -item.qty,
           transaction_type: 'In',
-          reference_id: selectedInvoiceId,
-          reference_type: 'Return',
-          date,
+          reference_id: cnData.id,
+          reference_type: 'CreditNote',
+          date: invoiceDate.split('T')[0],
           data: item
         }]);
       }
 
-      toast.success('Credit Note generated and balance updated!');
+      toast.success('Credit Note saved successfully!');
       queryClient.invalidateQueries({ queryKey: ['credit_notes'] });
-      queryClient.invalidateQueries({ queryKey: ['customers'] });
-      navigate('/sales/returns');
+      navigate('/sales/credit-notes');
     } catch (err: any) {
       console.error(err);
       toast.error(err.message || 'Failed to save credit note');
@@ -208,190 +440,173 @@ export default function CreditNoteCreate() {
 
   return (
     <div className="space-y-6 pb-20">
-      <header className="flex items-center gap-4">
-        <button onClick={() => navigate(-1)} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
-          <ArrowLeft className="w-5 h-5" />
-        </button>
+      <header className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div>
-          <h2 className="text-2xl font-black text-slate-900 dark:text-slate-50 uppercase tracking-tight">Customer Return / Credit Note</h2>
-          <p className="text-sm text-slate-500 font-medium">Issue a credit note against an existing invoice for returned goods.</p>
+          <h2 className="text-2xl font-black text-slate-900 dark:text-slate-50 uppercase tracking-tight">SONALI ERP - Sales Return / Credit Note</h2>
+          <p className="text-sm text-slate-500 font-medium mt-1">Create Sales Returns and Credit Notes against original invoices.</p>
+        </div>
+        <div className="flex gap-2">
+          <button 
+            disabled={isSaving || lines.length === 0}
+            onClick={saveCreditNote}
+            className="inline-flex items-center gap-2 rounded-3xl bg-[#16a34a] px-8 py-3 text-sm font-bold text-white transition hover:bg-green-700 disabled:opacity-50 shadow-lg active:scale-95"
+          >
+            {isSaving ? <Loader className="w-4 h-4 animate-spin" /> : <CreditCard className="w-4 h-4" />}
+            {isSaving ? 'Processing...' : 'Save Credit Note'}
+          </button>
         </div>
       </header>
 
-      <div className="grid gap-6 xl:grid-cols-[1fr_350px]">
+      <div className="grid gap-6 xl:grid-cols-[1fr_400px]">
         <div className="space-y-6">
-          {/* Step 1: Selection */}
           <div className="glass-card rounded-3xl border border-slate-200 p-6 shadow-sm dark:border-slate-800">
-            <div className="grid gap-6 md:grid-cols-2">
+            <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
               <div className="space-y-2">
-                <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">1. Select Customer</label>
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">Return Date</label>
+                <input type="datetime-local" value={invoiceDate} onChange={e => setInvoiceDate(e.target.value)} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2 text-sm outline-none" />
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">Buyer Selection</label>
                 <SearchableDropdown
                   table="customers"
                   searchFields={['name', 'gstin', 'mobile']}
                   displayField="name"
                   helperFields={['gstin', 'mobile']}
-                  onSelect={(c) => {
-                    setSelectedCustomerId(c.id);
-                    setSelectedInvoiceId('');
-                  }}
+                  onSelect={(c) => setSelectedCustomerId(c.id)}
                   placeholder="Search Customer..."
-                  value={customers.find(c => c.id === selectedCustomerId)?.name}
+                  value={selectedCustomer?.name}
                 />
               </div>
 
               <div className="space-y-2">
-                <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">2. Select Original Invoice</label>
-                <select 
-                  disabled={!selectedCustomerId}
-                  value={selectedInvoiceId} 
-                  onChange={e => setSelectedInvoiceId(e.target.value)} 
-                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-slate-900/10 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 disabled:opacity-50"
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">Against Original Invoice (Return)</label>
+                <select
+                  value={originalInvoiceId}
+                  onChange={e => handleSelectOriginalInvoice(e.target.value)}
+                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2 text-sm outline-none"
                 >
-                  <option value="">{selectedCustomerId ? 'Choose Invoice...' : 'Select customer first'}</option>
-                  {customerInvoices.map(inv => <option key={inv.id} value={inv.id}>{inv.invoiceNumber} - ₹{inv.grandTotal} ({new Date(inv.date).toLocaleDateString()})</option>)}
+                  <option value="">-- Select Invoice --</option>
+                  {originalInvoices.map((inv) => (
+                    <option key={inv.id} value={inv.id}>
+                      {inv.invoice_no} — {inv.date} — ₹{inv.grand_total}
+                    </option>
+                  ))}
                 </select>
-              </div>
-
-              <div className="space-y-2">
-                <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">Reason for Return</label>
-                <input 
-                  value={reason} 
-                  onChange={e => setReason(e.target.value)} 
-                  placeholder="e.g. Damage, Wrong Item, etc."
-                  className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm outline-none shadow-sm dark:bg-slate-950 dark:border-slate-700" 
-                />
-              </div>
-
-              <div className="space-y-2">
-                <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">Return Date</label>
-                <input 
-                  type="date"
-                  value={date} 
-                  onChange={e => setDate(e.target.value)} 
-                  className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm outline-none shadow-sm dark:bg-slate-950 dark:border-slate-700" 
-                />
+                {originalInvoiceId && (
+                  <div className="mt-1">
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-green-100 text-green-800">
+                      ↩️ Return against {originalInvoices.find(i => i.id === originalInvoiceId)?.invoice_no}
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
           </div>
 
-          {/* Step 2: Items Table */}
           <div className="glass-card rounded-3xl border border-slate-200 overflow-hidden shadow-sm dark:border-slate-800">
-            <div className="bg-slate-50 dark:bg-slate-900 border-b border-slate-200 p-4 dark:border-slate-800">
-              <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">Items from Invoice {selectedInvoice?.invoiceNumber}</h3>
-              <p className="text-[10px] text-slate-500 uppercase tracking-widest font-black">Select items and enter return quantity</p>
+            <div className="bg-slate-50 dark:bg-slate-900 border-b border-slate-200 p-4">
+              <div className="grid gap-3 lg:grid-cols-12 items-end">
+                <div className="lg:col-span-4 space-y-1">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Select Product</label>
+                  <SearchableDropdown
+                    table="products"
+                    searchFields={['name', 'part_no', 'hsn_code']}
+                    displayField="name"
+                    helperFields={['part_no', 'mrp']}
+                    onSelect={(p) => setSelectedProductId(p.id)}
+                    placeholder="Search Product..."
+                    value={selectedProduct?.name}
+                  />
+                </div>
+                <div className="lg:col-span-2 space-y-1">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-center block">Qty</label>
+                  <input type="number" value={qtyInput} onChange={e => setQtyInput(e.target.value === '' ? '' : Number(e.target.value))} className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none text-center" />
+                </div>
+                <div className="lg:col-span-2 space-y-1">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-center block">Disc %</label>
+                  <input type="number" value={discPercentInput} onChange={e => { setDiscPercentInput(e.target.value === '' ? '' : Number(e.target.value)); setIsDiscManual(true); }} className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none text-center" />
+                </div>
+                <div className="lg:col-span-4">
+                  <button onClick={addLine} className="w-full rounded-xl bg-slate-900 py-2.5 text-sm font-bold text-white hover:bg-slate-800 flex items-center justify-center gap-2">
+                    <Plus className="w-4 h-4" /> Add Item
+                  </button>
+                </div>
+              </div>
             </div>
 
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm text-slate-700 dark:text-slate-300">
-                <thead className="bg-slate-50 dark:bg-slate-900/50 text-[10px] font-black uppercase tracking-widest text-slate-500">
-                  <tr>
-                    <th className="px-4 py-3 text-center w-12">Select</th>
-                    <th className="px-3 py-3">Product / Part No</th>
-                    <th className="px-3 py-3 text-center">Orig. Qty</th>
-                    <th className="px-3 py-3 text-center">Return Qty</th>
-                    <th className="px-3 py-3 text-right">Price</th>
-                    <th className="px-3 py-3 text-right w-32">Return Amt</th>
+            <table className="w-full text-left text-sm text-slate-700">
+              <thead className="bg-slate-50 text-[10px] font-black uppercase tracking-widest text-slate-500">
+                <tr>
+                  <th className="px-4 py-3">Description</th>
+                  <th className="px-3 py-3 text-center">Qty</th>
+                  <th className="px-3 py-3 text-right">Rate</th>
+                  <th className="px-3 py-3 text-right">Disc%</th>
+                  <th className="px-3 py-3 text-right">Taxable</th>
+                  <th className="px-3 py-3 text-right">GST</th>
+                  <th className="px-4 py-3 text-right">Amount</th>
+                  <th className="px-4 py-3 text-center"></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {lines.map((l, i) => (
+                  <tr key={i} className="hover:bg-slate-50/50">
+                    <td className="px-4 py-3">
+                      <div className="font-bold text-slate-900">{l.productName}</div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-slate-400">{l.partNo}</span>
+                        {(l as any).ruleName && (
+                          <span className={`px-1.5 py-0.5 rounded text-[8px] font-black uppercase border ${(l as any).badgeColor}`}>
+                            {(l as any).ruleName}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-3 py-3 text-center font-black text-indigo-600">{l.qty}</td>
+                    <td className="px-3 py-3 text-right">₹{l.effectivePrice.toFixed(2)}</td>
+                    <td className="px-3 py-3 text-right text-rose-500">{l.discountPercent}%</td>
+                    <td className="px-3 py-3 text-right font-bold">₹{l.basicAmount.toFixed(2)}</td>
+                    <td className="px-3 py-3 text-right text-xs">₹{l.gstAmount.toFixed(2)}</td>
+                    <td className="px-4 py-3 text-right font-black text-slate-900">₹{l.lineTotal.toFixed(2)}</td>
+                    <td className="px-4 py-3 text-center">
+                      <button onClick={() => removeLine(i)} className="text-slate-300 hover:text-rose-600"><Trash2 className="w-4 h-4" /></button>
+                    </td>
                   </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {!selectedInvoiceId ? (
-                    <tr>
-                      <td colSpan={6} className="px-4 py-12 text-center text-slate-400 font-medium italic">
-                        Select an invoice above to see its items.
-                      </td>
-                    </tr>
-                  ) : returnItems.length === 0 ? (
-                    <tr>
-                      <td colSpan={6} className="px-4 py-12 text-center text-slate-400 font-medium italic">
-                        No items found in this invoice.
-                      </td>
-                    </tr>
-                  ) : (
-                    returnItems.map((item, i) => (
-                      <tr key={i} className={`hover:bg-slate-50/50 dark:hover:bg-slate-900/30 transition-colors ${item.selected ? 'bg-indigo-50/30 dark:bg-indigo-900/5' : ''}`}>
-                        <td className="px-4 py-3 text-center">
-                          <input 
-                            type="checkbox" 
-                            checked={item.selected} 
-                            onChange={() => toggleItemSelection(i)}
-                            className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-600 w-4 h-4 cursor-pointer"
-                          />
-                        </td>
-                        <td className="px-3 py-3">
-                          <div className="font-bold text-slate-900 dark:text-slate-100">{item.productName}</div>
-                          <div className="text-[10px] font-medium text-slate-400">{item.partNo}</div>
-                        </td>
-                        <td className="px-3 py-3 text-center font-bold">{item.qty}</td>
-                        <td className="px-3 py-3 text-center">
-                          <input 
-                            type="number" 
-                            min="0" 
-                            max={item.qty} 
-                            value={item.returnQty} 
-                            onChange={e => updateReturnQty(i, Number(e.target.value))}
-                            className="w-20 rounded-xl border border-slate-200 bg-white px-3 py-1 text-sm outline-none text-center shadow-sm" 
-                          />
-                        </td>
-                        <td className="px-3 py-3 text-right">₹{item.effectivePrice.toFixed(2)}</td>
-                        <td className="px-3 py-3 text-right font-black text-indigo-600">₹{(item.effectivePrice * item.returnQty * (1 + item.gstRate/100)).toFixed(2)}</td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
 
-        {/* Sidebar: Totals */}
         <aside className="space-y-6">
-          <div className="glass-card rounded-3xl border border-slate-200 p-6 shadow-xl dark:border-slate-800 sticky top-6 bg-slate-900 text-white">
+          <div className="glass-card rounded-3xl border border-green-100 p-6 shadow-xl bg-[#14532d] text-white">
             <h3 className="text-lg font-black uppercase tracking-tight flex items-center gap-2 border-b border-white/10 pb-4 mb-6">
-              <Calculator className="w-5 h-5 text-indigo-400" /> Credit Summary
+              <Calculator className="w-5 h-5 text-green-400" /> Return Totals
             </h3>
-            
             <div className="space-y-4">
-              <div className="flex justify-between text-xs font-bold text-slate-400 uppercase tracking-widest">
+              <div className="flex justify-between text-xs font-bold text-green-300 uppercase tracking-widest">
                 <span>Taxable Amount</span>
-                <span className="font-mono">₹{totals.subtotalBasic.toFixed(2)}</span>
+                <span>₹{totals.taxableAmount.toFixed(2)}</span>
               </div>
               <div className="flex justify-between text-xs font-bold text-slate-300">
-                <span>Total GST</span>
-                <span className="font-mono">₹{(totals.totalCgst + totals.totalSgst + totals.totalIgst).toFixed(2)}</span>
+                <span>CGST / SGST</span>
+                <span>₹{totals.goodsGst.toFixed(2)}</span>
               </div>
-              {totals.roundOff !== 0 && (
-                <div className="flex justify-between text-[10px] font-bold text-slate-500 italic">
-                  <span>Round Off</span>
-                  <span className="font-mono">{totals.roundOff > 0 ? '+' : ''}{totals.roundOff.toFixed(2)}</span>
-                </div>
-              )}
-              
               <div className="pt-6 mt-6 border-t border-white/20">
-                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Total Refund Amount</p>
-                <div className="text-4xl font-black text-indigo-400 tracking-tighter">
-                  ₹{totals.totalAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                <p className="text-[10px] font-black text-green-300 uppercase tracking-widest mb-1">Total Refund Amount</p>
+                <div className="text-4xl font-black text-green-400 tracking-tighter">
+                  ₹{totals.billTotal.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                 </div>
               </div>
+              <button 
+                disabled={isSaving || lines.length === 0}
+                onClick={saveCreditNote}
+                className="w-full rounded-3xl bg-green-500 px-5 py-4 text-sm font-black text-white hover:bg-green-400 mt-4 flex items-center justify-center gap-3"
+              >
+                {isSaving ? <Loader className="w-5 h-5 animate-spin" /> : <CreditCard className="w-4 h-4" />}
+                {isSaving ? 'SAVING...' : 'SAVE CREDIT NOTE'}
+              </button>
             </div>
-
-            <button 
-              disabled={isSaving || totals.totalAmount === 0}
-              onClick={saveCreditNote}
-              className="w-full rounded-3xl bg-indigo-600 px-5 py-4 text-sm font-black text-white transition hover:bg-indigo-500 disabled:opacity-50 shadow-2xl active:scale-95 flex items-center justify-center gap-3 mt-8"
-            >
-              {isSaving ? <Loader className="w-5 h-5 animate-spin" /> : <CheckCircle2 className="w-5 h-5" />}
-              {isSaving ? 'SAVING...' : 'CONFIRM RETURN'}
-            </button>
-          </div>
-          
-          <div className="glass-card rounded-3xl border border-slate-200 p-6 shadow-sm dark:border-slate-800 bg-slate-50 dark:bg-slate-950">
-             <h4 className="text-[10px] font-black text-slate-900 dark:text-slate-100 uppercase tracking-widest flex items-center gap-2 mb-3">
-                <Plus className="w-3.5 h-3.5 text-indigo-500" /> Auto-Sequence
-             </h4>
-             <p className="text-[10px] leading-relaxed text-slate-500 font-medium">
-               The credit note will follow the pattern <span className="font-bold">CN/YY-YY/XXXX</span>. 
-               The refund amount will be automatically deducted from the customer's outstanding balance.
-             </p>
           </div>
         </aside>
       </div>
