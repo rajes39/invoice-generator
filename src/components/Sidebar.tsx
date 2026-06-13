@@ -29,6 +29,7 @@ const menuGroups = [
   {
     title: 'Sales',
     items: [
+      { label: 'Scanner Invoice', path: '/sales/scanner' },
       { label: 'Sales Orders', path: '/sales/orders' },
       { label: 'Invoices', path: '/sales/invoices' },
       { label: 'Returns', path: '/sales/returns' },

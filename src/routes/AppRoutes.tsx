@@ -36,6 +36,7 @@ function PlaceholderPage({ title, description }: { title: string; description: s
   );
 }
 
+import ScannerInvoice from '../pages/ScannerInvoice';
 import GRN from '../pages/GRN';
 import PurchaseOrders from '../pages/PurchaseOrders';
 import Stock from '../pages/Stock';
@@ -148,6 +149,14 @@ export default function AppRoutes() {
         element={
           <ProtectedRoute>
             <PlaceholderPage title="Sales Orders" description="Create sales orders and convert them to invoices." />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/sales/scanner"
+        element={
+          <ProtectedRoute>
+            <ScannerInvoice />
           </ProtectedRoute>
         }
       />
