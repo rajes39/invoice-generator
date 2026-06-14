@@ -178,25 +178,91 @@ export function generateInvoicePDFPage(doc: jsPDF, invoice: Invoice, company: Co
 
   let finalY = (doc as any).lastAutoTable.finalY;
 
+  // 5.1 GST Breakup Table
+  const gstSummary = (invoice.items || []).reduce((acc: any, item) => {
+    const rate = item.gstRate || 0;
+    if (!acc[rate]) {
+      acc[rate] = { taxable: 0, cgst: 0, sgst: 0, igst: 0 };
+    }
+    acc[rate].taxable += (item.basicAmount || 0);
+    if (invoice.totalIgst > 0) {
+      acc[rate].igst += (item.gstAmount || 0);
+    } else {
+      acc[rate].cgst += (item.gstAmount || 0) / 2;
+      acc[rate].sgst += (item.gstAmount || 0) / 2;
+    }
+    return acc;
+  }, {});
+
+  if (invoice.freightCharges > 0) {
+    const rate = 18;
+    if (!gstSummary[rate]) gstSummary[rate] = { taxable: 0, cgst: 0, sgst: 0, igst: 0 };
+    gstSummary[rate].taxable += invoice.freightCharges;
+    if (invoice.totalIgst > 0) {
+      gstSummary[rate].igst += invoice.freightGst;
+    } else {
+      gstSummary[rate].cgst += invoice.freightGst / 2;
+      gstSummary[rate].sgst += invoice.freightGst / 2;
+    }
+  }
+
+  const gstTableRows = Object.entries(gstSummary).map(([rate, vals]: [string, any]) => {
+    if (invoice.totalIgst > 0) {
+      return [
+        `${rate}%`,
+        vals.taxable.toFixed(2),
+        `${rate}%`,
+        vals.igst.toFixed(2),
+        (vals.igst).toFixed(2)
+      ];
+    } else {
+      return [
+        `${rate}%`,
+        vals.taxable.toFixed(2),
+        `${parseFloat(rate)/2}%`,
+        vals.cgst.toFixed(2),
+        `${parseFloat(rate)/2}%`,
+        vals.sgst.toFixed(2),
+        (vals.cgst + vals.sgst).toFixed(2)
+      ];
+    }
+  });
+
+  const gstHead = invoice.totalIgst > 0 
+    ? [['GST Rate', 'Taxable Val', 'IGST Rate', 'IGST Amt', 'Total Tax']]
+    : [['GST Rate', 'Taxable Val', 'CGST Rate', 'CGST Amt', 'SGST Rate', 'SGST Amt', 'Total Tax']];
+
+  autoTable(doc, {
+    head: gstHead,
+    body: gstTableRows,
+    startY: finalY + 5,
+    styles: { fontSize: 6, cellPadding: 2, lineColor: [0, 0, 0], lineWidth: 0.5 },
+    headStyles: { fillColor: [245, 245, 245], textColor: [0, 0, 0], fontStyle: 'bold' },
+    margin: { left: 40, right: 300 } // Keep it on the left half
+  });
+
+  finalY = (doc as any).lastAutoTable.finalY;
+
   // 6. Totals Section (Split Box)
-  doc.rect(40, finalY, 515, 100);
-  doc.line(360, finalY, 360, finalY + 100); // Vertical divide
+  const totalsY = finalY + 10;
+  doc.rect(40, totalsY, 515, 100);
+  doc.line(360, totalsY, 360, totalsY + 100); // Vertical divide
 
   // Left side: Words and Bank
   doc.setFontSize(8);
   doc.setFont('helvetica', 'bold');
-  doc.text("AMOUNT IN WORDS", 45, finalY + 15);
-  doc.line(45, finalY + 17, 130, finalY + 17);
+  doc.text("AMOUNT IN WORDS", 45, totalsY + 15);
+  doc.line(45, totalsY + 17, 130, totalsY + 17);
   doc.setFont('helvetica', 'bolditalic');
-  doc.text(`${numberToWords(invoice.grandTotal)} ONLY`, 45, finalY + 30, { maxWidth: 300 });
+  doc.text(`${numberToWords(invoice.grandTotal)} ONLY`, 45, totalsY + 30, { maxWidth: 300 });
 
   doc.setFont('helvetica', 'bold');
-  doc.text("BANK DETAILS", 45, finalY + 55);
-  doc.line(45, finalY + 57, 110, finalY + 57);
+  doc.text("BANK DETAILS", 45, totalsY + 55);
+  doc.line(45, totalsY + 57, 110, totalsY + 57);
   doc.setFont('helvetica', 'normal');
-  doc.text(`Bank: ${cBank || 'N/A'}`, 45, finalY + 68);
-  doc.text(`A/c No: ${cAcc || 'N/A'}`, 45, finalY + 78);
-  doc.text(`IFSC: ${cIfsc || 'N/A'} | Branch: ${cBranch || 'N/A'}`, 45, finalY + 88);
+  doc.text(`Bank: ${cBank || 'N/A'}`, 45, totalsY + 68);
+  doc.text(`A/c No: ${cAcc || 'N/A'}`, 45, totalsY + 78);
+  doc.text(`IFSC: ${cIfsc || 'N/A'} | Branch: ${cBranch || 'N/A'}`, 45, totalsY + 88);
 
   // Right side: Totals
   const totalRow = (label: string, value: string, y: number, isBold: boolean = false) => {
@@ -205,52 +271,60 @@ export function generateInvoicePDFPage(doc: jsPDF, invoice: Invoice, company: Co
     doc.text(value, 550, y, { align: 'right' });
   };
 
-  totalRow("Goods Taxable:", formatCurrency(invoice.subtotalBasic), finalY + 15);
+  totalRow("Goods Taxable:", formatCurrency(invoice.subtotalBasic), totalsY + 15);
   if (invoice.freightCharges > 0) {
-    totalRow("Freight Charges:", formatCurrency(invoice.freightCharges), finalY + 27);
-    totalRow("Freight GST (18%):", formatCurrency(invoice.freightGst), finalY + 39);
+    totalRow("Freight Charges:", formatCurrency(invoice.freightCharges), totalsY + 27);
+    totalRow("Freight GST (18%):", formatCurrency(invoice.freightGst), totalsY + 39);
   }
-  totalRow("Total GST:", formatCurrency(invoice.totalIgst || (invoice.totalCgst + invoice.totalSgst)), finalY + 51);
+  totalRow("Total GST:", formatCurrency(invoice.totalIgst || (invoice.totalCgst + invoice.totalSgst)), totalsY + 51);
   if (invoice.roundOff !== 0) {
-    totalRow("Round Off:", `${invoice.roundOff > 0 ? '+' : ''}${invoice.roundOff.toFixed(2)}`, finalY + 63);
+    totalRow("Round Off:", `${invoice.roundOff > 0 ? '+' : ''}${invoice.roundOff.toFixed(2)}`, totalsY + 63);
   }
 
   // Bill Total Highlight
   doc.setFillColor(245, 245, 245);
-  doc.rect(360.5, finalY + 75, 194, 24.5, 'F');
+  doc.rect(360.5, totalsY + 75, 194, 24.5, 'F');
   doc.setFontSize(10);
   doc.setFont('helvetica', 'bold');
-  doc.text("BILL TOTAL:", 365, finalY + 91);
+  doc.text("BILL TOTAL:", 365, totalsY + 91);
   doc.setFontSize(12);
-  doc.text(formatCurrency(invoice.grandTotal), 550, finalY + 91, { align: 'right' });
+  doc.text(formatCurrency(invoice.grandTotal), 550, totalsY + 91, { align: 'right' });
 
   // 7. Terms & Conditions
+  const tcY = totalsY + 115;
   doc.setFontSize(8);
   doc.setFont('helvetica', 'bold');
-  doc.text("TERMS & CONDITIONS", 40, finalY + 115);
-  doc.line(40, finalY + 117, 135, finalY + 117);
+  doc.text("TERMS & CONDITIONS", 40, tcY);
+  doc.line(40, tcY + 2, 135, tcY + 2);
   doc.setFontSize(7);
   doc.setFont('helvetica', 'normal');
   TERMS.slice(0, 5).forEach((t, idx) => {
-    doc.text(`• ${t}`, 40, finalY + 128 + (idx * 10));
+    doc.text(`• ${t}`, 40, tcY + 12 + (idx * 10));
   });
 
   // 8. Signatures
+  const sigY = totalsY + 185;
   doc.setFontSize(9);
-  doc.rect(40, finalY + 185, 515, 60);
-  doc.line(297, finalY + 185, 297, finalY + 245);
+  doc.rect(40, sigY, 515, 60);
+  doc.line(297, sigY, 297, sigY + 60);
 
   doc.setFont('helvetica', 'bolditalic');
-  doc.text("Certified that the particulars given above are correct and complete.", 45, finalY + 195);
+  doc.text("Certified that the particulars given above are correct and complete.", 45, sigY + 12);
   doc.setFont('helvetica', 'bold');
-  doc.text("Receiver's Signature", 45, finalY + 235);
-  doc.line(45, finalY + 225, 150, finalY + 225);
+  doc.text("Receiver's Signature", 45, sigY + 50);
+  doc.line(45, sigY + 42, 150, sigY + 42);
 
-  doc.text(`For ${cName.toUpperCase()}`, 550, finalY + 195, { align: 'right' });
-  doc.text("Authorised Signatory", 550, finalY + 235, { align: 'right' });
-  doc.line(440, finalY + 225, 550, finalY + 225);
+  doc.text(`For ${cName.toUpperCase()}`, 550, sigY + 12, { align: 'right' });
+  doc.text("Authorised Signatory", 550, sigY + 50, { align: 'right' });
+  doc.line(440, sigY + 42, 550, sigY + 42);
 
   doc.setFontSize(8);
   doc.setFont('helvetica', 'normal');
-  doc.text("This is a computer generated tax invoice", 300, finalY + 258, { align: 'center' });
+  doc.text("This is a computer generated tax invoice", 300, sigY + 75, { align: 'center' });
+}
+
+export async function generateSingleInvoicePDF(invoice: Invoice, company: CompanySettings | null): Promise<Blob> {
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'a4' });
+  generateInvoicePDFPage(doc, invoice, company);
+  return doc.output('blob');
 }

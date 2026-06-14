@@ -9,6 +9,7 @@ import { toast } from 'react-hot-toast';
 import * as XLSX from 'xlsx';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import JSZip from 'jszip';
 import { 
   Calendar, 
   X, 
@@ -20,8 +21,11 @@ import {
   Edit, 
   Trash2, 
   Loader,
-  Filter
+  Filter,
+  ChevronDown,
+  FileArchive
 } from 'lucide-react';
+import { generateSingleInvoicePDF } from '../services/pdfService';
 
 export default function Invoices() {
   const queryClient = useQueryClient();
@@ -29,6 +33,7 @@ export default function Invoices() {
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
   const [isExporting, setIsExporting] = useState(false);
+  const [showPdfDropdown, setShowPdfDropdown] = useState(false);
 
   const { data: invoices = [], isLoading } = useQuery({
     queryKey: ['invoices'],
@@ -169,7 +174,7 @@ export default function Invoices() {
         generateInvoicePDFPage(doc, filteredInvoices[i], company || null);
       }
 
-      const fileName = `Invoices_${fromDate || 'Start'}_to_${toDate || 'End'}.pdf`;
+      const fileName = `Invoices_Combined_${fromDate || 'Start'}_to_${toDate || 'End'}.pdf`;
       doc.save(fileName);
       toast.success('Bulk PDF Downloaded', { id: toastId });
     } catch (err) {
@@ -177,6 +182,81 @@ export default function Invoices() {
       toast.error('PDF export failed', { id: toastId });
     } finally {
       setIsExporting(false);
+      setShowPdfDropdown(false);
+    }
+  };
+
+  const handleDownloadSeparatePdfs = async () => {
+    if (filteredInvoices.length === 0) {
+      toast.error('No invoices to export');
+      return;
+    }
+
+    setIsExporting(true);
+    const toastId = toast.loading('Initializing separate downloads...');
+
+    try {
+      for (let i = 0; i < filteredInvoices.length; i++) {
+        const invoice = filteredInvoices[i];
+        toast.loading(`Downloading ${i + 1} of ${filteredInvoices.length}: ${invoice.invoiceNumber}`, { id: toastId });
+        
+        const blob = await generateSingleInvoicePDF(invoice, company || null);
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `${invoice.customerName}_${invoice.invoiceNumber.replace(/\//g, '_')}.pdf`;
+        link.click();
+        URL.revokeObjectURL(url);
+
+        if (i < filteredInvoices.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 800));
+        }
+      }
+      toast.success('All PDFs downloaded separately', { id: toastId });
+    } catch (err) {
+      console.error('Separate PDF Download Error:', err);
+      toast.error('Failed to download some PDFs', { id: toastId });
+    } finally {
+      setIsExporting(false);
+      setShowPdfDropdown(false);
+    }
+  };
+
+  const handleDownloadZip = async () => {
+    if (filteredInvoices.length === 0) {
+      toast.error('No invoices to export');
+      return;
+    }
+
+    setIsExporting(true);
+    const toastId = toast.loading('Generating ZIP archive...');
+
+    try {
+      const zip = new JSZip();
+      
+      const pdfPromises = filteredInvoices.map(async (invoice) => {
+        const blob = await generateSingleInvoicePDF(invoice, company || null);
+        const fileName = `${invoice.customerName}_${invoice.invoiceNumber.replace(/\//g, '_')}.pdf`;
+        zip.file(fileName, blob);
+      });
+
+      await Promise.all(pdfPromises);
+      
+      const zipBlob = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(zipBlob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `Invoices_Archive_${fromDate || 'Start'}_to_${toDate || 'End'}.zip`;
+      link.click();
+      URL.revokeObjectURL(url);
+      
+      toast.success('ZIP archive downloaded', { id: toastId });
+    } catch (err) {
+      console.error('ZIP Generation Error:', err);
+      toast.error('Failed to generate ZIP', { id: toastId });
+    } finally {
+      setIsExporting(false);
+      setShowPdfDropdown(false);
     }
   };
 
@@ -197,14 +277,45 @@ export default function Invoices() {
             {isExporting ? <Loader className="w-4 h-4 animate-spin" /> : <FileSpreadsheet className="w-4 h-4 text-emerald-600" />}
             Excel
           </button>
-          <button 
-            disabled={isExporting || isLoading}
-            onClick={handleBulkExportPdf}
-            className="rounded-3xl border border-slate-200 bg-white px-5 py-2.5 text-sm font-bold text-slate-700 transition hover:bg-slate-50 flex items-center gap-2 shadow-sm disabled:opacity-50"
-          >
-            {isExporting ? <Loader className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4 text-rose-600" />}
-            PDF
-          </button>
+          
+          <div className="relative">
+            <button 
+              disabled={isExporting || isLoading}
+              onClick={() => setShowPdfDropdown(!showPdfDropdown)}
+              className="rounded-3xl border border-slate-200 bg-white px-5 py-2.5 text-sm font-bold text-slate-700 transition hover:bg-slate-50 flex items-center gap-2 shadow-sm disabled:opacity-50"
+            >
+              {isExporting ? <Loader className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4 text-rose-600" />}
+              PDF Options
+              <ChevronDown className={`w-4 h-4 transition-transform ${showPdfDropdown ? 'rotate-180' : ''}`} />
+            </button>
+
+            {showPdfDropdown && (
+              <div className="absolute right-0 mt-2 w-56 rounded-2xl bg-white border border-slate-100 shadow-xl z-50 overflow-hidden dark:bg-slate-900 dark:border-slate-800">
+                <button 
+                  onClick={handleBulkExportPdf}
+                  className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50 flex items-center gap-3 transition-colors dark:text-slate-300 dark:hover:bg-slate-800"
+                >
+                  <FileText className="w-4 h-4 text-rose-600" />
+                  Combined PDF
+                </button>
+                <button 
+                  onClick={handleDownloadSeparatePdfs}
+                  className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50 flex items-center gap-3 transition-colors border-t border-slate-50 dark:text-slate-300 dark:hover:bg-slate-800 dark:border-slate-800"
+                >
+                  <FileText className="w-4 h-4 text-indigo-600" />
+                  Separate PDFs
+                </button>
+                <button 
+                  onClick={handleDownloadZip}
+                  className="w-full text-left px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50 flex items-center gap-3 transition-colors border-t border-slate-50 dark:text-slate-300 dark:hover:bg-slate-800 dark:border-slate-800"
+                >
+                  <FileArchive className="w-4 h-4 text-amber-600" />
+                  Download ZIP
+                </button>
+              </div>
+            )}
+          </div>
+
           <Link
             to="/sales/invoices/new"
             className="inline-flex items-center gap-2 justify-center rounded-3xl bg-slate-900 px-6 py-2.5 text-sm font-bold text-white transition hover:bg-slate-800 shadow-lg"
