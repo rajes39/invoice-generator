@@ -1,5 +1,5 @@
 import jsPDF from 'jspdf';
-import 'jspdf-autotable';
+import autoTable from 'jspdf-autotable';
 import { Invoice, CompanySettings } from '../types/index';
 import { numberToWords } from './invoiceService';
 
@@ -124,7 +124,7 @@ export function generateInvoicePDFPage(doc: jsPDF, invoice: Invoice, company: Co
     ]);
   }
 
-  (doc as any).autoTable({
+  autoTable(doc, {
     head: [['Sr', 'Part', 'Description', 'HSN', 'MRP', 'Rate', 'Qty', 'D%', 'D(Rs)', 'Taxable', 'G%', 'G(Rs)', 'Amt']],
     body: tableData,
     startY: 265,

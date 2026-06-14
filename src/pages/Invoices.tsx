@@ -8,7 +8,7 @@ import type { Invoice, CompanySettings } from '../types/index';
 import { toast } from 'react-hot-toast';
 import * as XLSX from 'xlsx';
 import jsPDF from 'jspdf';
-import 'jspdf-autotable';
+import autoTable from 'jspdf-autotable';
 import { 
   Calendar, 
   X, 
@@ -58,18 +58,13 @@ export default function Invoices() {
       
       const invDate = (inv.date || '').split('T')[0];
       
-      // Robust date filtering
-      let matchesFrom = true;
-      if (fromDate) {
-        matchesFrom = invDate >= fromDate;
-      }
-      
-      let matchesTo = true;
-      if (toDate) {
-        matchesTo = invDate <= toDate;
+      // Only apply date filter when BOTH from and to dates are selected
+      let matchesDates = true;
+      if (fromDate && toDate) {
+        matchesDates = invDate >= fromDate && invDate <= toDate;
       }
 
-      return matchesSearch && matchesFrom && matchesTo;
+      return matchesSearch && matchesDates;
     });
 
     return result.sort((a, b) => a.customerName.localeCompare(b.customerName));
