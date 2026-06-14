@@ -11,8 +11,11 @@ import {
   Trash2,
   Barcode,
   Search,
-  Minus
+  Minus,
+  Camera,
+  X
 } from 'lucide-react';
+import { Html5Qrcode } from 'html5-qrcode';
 import { supabase } from '../lib/supabase';
 import { SearchableDropdown } from '../components/SearchableDropdown';
 import { 
@@ -35,6 +38,11 @@ export default function ScannerInvoice() {
   const [status, setStatus] = useState<'Draft' | 'Active'>('Active');
   const [flash, setFlash] = useState<'success' | 'error' | null>(null);
   
+  // -- Camera & Device State --
+  const [showCamera, setShowCamera] = useState(false);
+  const [html5QrCode, setHtml5QrCode] = useState<Html5Qrcode | null>(null);
+  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || window.innerWidth < 768;
+
   // -- Meta Info --
   const [remark, setRemark] = useState('');
   const [freightCharges, setFreightCharges] = useState<number>(0);
@@ -118,13 +126,14 @@ export default function ScannerInvoice() {
 
   // Auto-focus barcode field
   useEffect(() => {
+    if (isMobile) return;
     const focusTimer = setInterval(() => {
       if (barcodeInputRef.current && document.activeElement !== barcodeInputRef.current) {
         barcodeInputRef.current.focus();
       }
     }, 1000);
     return () => clearInterval(focusTimer);
-  }, []);
+  }, [isMobile]);
 
   const playBeep = (type: 'success' | 'error') => {
     try {
@@ -227,43 +236,37 @@ export default function ScannerInvoice() {
     };
   };
 
-  const handleScan = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleBarcodeInput = async (code: string) => {
     if (!selectedCustomerId) {
       toast.error('Select a customer first!');
       setFlash('error');
       playBeep('error');
-      setBarcodeInput('');
       return;
     }
 
-    const code = barcodeInput.trim();
-    if (!code) return;
+    const cleanCode = code.trim();
+    if (!cleanCode) return;
 
     try {
-      // Search product by barcode_no, sku, or part_no
       const { data: product } = await supabase
         .from('products')
         .select('*')
-        .or(`barcode_no.eq."${code}",sku.eq."${code}",part_no.eq."${code}"`)
+        .or(`barcode_no.eq."${cleanCode}",sku.eq."${cleanCode}",part_no.eq."${cleanCode}"`)
         .maybeSingle();
 
       if (!product) {
-        toast.error(`Product not found: ${code}`);
+        toast.error(`Product not found: ${cleanCode}`);
         setFlash('error');
         playBeep('error');
-        setBarcodeInput('');
         return;
       }
 
-      // Add to lines or increment qty
       const existingIdx = lines.findIndex(l => l.productId === product.id);
       if (existingIdx >= 0) {
         const updatedLines = [...lines];
         const line = updatedLines[existingIdx];
         const newQty = line.qty + 1;
         
-        // Recalculate with new qty (schemes might change)
         const pricing = getEffectivePricing(product as any, selectedCustomerId, newQty);
         const mrp = Number(product.mrp || 0);
         const gstRate = Number(product.gst_rate || 0);
@@ -318,7 +321,6 @@ export default function ScannerInvoice() {
 
       setFlash('success');
       playBeep('success');
-      setBarcodeInput('');
     } catch (err) {
       console.error(err);
       toast.error('Scanning error occurred');
@@ -327,17 +329,56 @@ export default function ScannerInvoice() {
     }
   };
 
+  const handleScan = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await handleBarcodeInput(barcodeInput);
+    setBarcodeInput('');
+  };
+
+  const startCamera = async () => {
+    if (!selectedCustomerId) {
+      toast.error('Select a customer first!');
+      return;
+    }
+    setShowCamera(true);
+    setTimeout(async () => {
+      try {
+        const qrCode = new Html5Qrcode("qr-reader-mobile");
+        setHtml5QrCode(qrCode);
+        await qrCode.start(
+          { facingMode: "environment" },
+          { fps: 10, qrbox: { width: 250, height: 250 } },
+          async (decodedText) => {
+            await qrCode.stop();
+            setShowCamera(false);
+            await handleBarcodeInput(decodedText);
+          },
+          () => {}
+        );
+      } catch (err) {
+        console.error('Camera failed:', err);
+        toast.error('Failed to start camera');
+        setShowCamera(false);
+      }
+    }, 100);
+  };
+
+  const stopCamera = async () => {
+    if (html5QrCode) {
+      try {
+        await html5QrCode.stop();
+      } catch (err) {
+        console.warn('Camera stop failed:', err);
+      }
+    }
+    setShowCamera(false);
+  };
+
   const updateQty = (idx: number, delta: number) => {
     const updatedLines = [...lines];
     const line = updatedLines[idx];
     const newQty = Math.max(1, line.qty + delta);
     
-    // We need the product object for recalculation
-    // Since we don't have it in lines, we could either store it or fetch it.
-    // Let's just update the line simply for now, but real logic should re-apply pricing rules.
-    // For robust logic, we'd fetch the product again or store minimal product info.
-    
-    // Mocking recalculation by fetching minimal product info
     supabase.from('products').select('*').eq('id', line.productId).single().then(({ data: product }) => {
       if (!product) return;
       const pricing = getEffectivePricing(product as any, selectedCustomerId, newQty);
@@ -442,7 +483,6 @@ export default function ScannerInvoice() {
 
       const id = await createInvoice(invoice);
       
-      // Update stock Ledger
       for (const item of lines) {
         await supabase.from('stock_ledger').insert([{
           user_id: session.user.id,
@@ -470,6 +510,25 @@ export default function ScannerInvoice() {
   return (
     <div className="space-y-6 pb-20 relative">
       <div className={`fixed inset-0 pointer-events-none transition-opacity duration-300 z-50 ${flash === 'success' ? 'bg-green-500/20 opacity-100' : flash === 'error' ? 'bg-red-500/20 opacity-100' : 'opacity-0'}`} />
+
+      {showCamera && (
+        <div className="fixed inset-0 bg-black z-50 flex flex-col">
+          <div className="flex justify-between items-center p-4 bg-slate-900 border-b border-slate-800">
+            <span className="text-white text-lg font-black uppercase tracking-tight flex items-center gap-2">
+              <Camera className="w-5 h-5 text-green-500" />
+              Scan QR Code
+            </span>
+            <button onClick={stopCamera} className="text-white p-2 rounded-full hover:bg-slate-800">
+              <X className="w-6 h-6" />
+            </button>
+          </div>
+          <div id="qr-reader-mobile" className="flex-1 bg-black" />
+          <div className="p-8 text-center text-white/70 text-sm font-medium bg-slate-900 border-t border-slate-800">
+            Point camera at the QR code on the product label.<br/>
+            <span className="text-[10px] text-slate-500 uppercase tracking-widest font-black mt-2 block">Ensure good lighting</span>
+          </div>
+        </div>
+      )}
 
       <header className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div>
@@ -510,25 +569,40 @@ export default function ScannerInvoice() {
               </div>
 
               <div className="space-y-2">
-                <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">2. Barcode Scanning</label>
-                <form onSubmit={handleScan} className="relative group">
-                  <input
-                    ref={barcodeInputRef}
-                    value={barcodeInput}
-                    onChange={(e) => setBarcodeInput(e.target.value)}
-                    placeholder="🔍 Ready to scan... point scanner here"
-                    className={`w-full rounded-2xl border-2 px-12 py-4 text-lg font-bold outline-none transition-all ${
-                      selectedCustomerId 
-                        ? 'border-green-500 bg-green-50 focus:ring-4 focus:ring-green-500/20' 
-                        : 'border-slate-200 bg-slate-100 cursor-not-allowed'
-                    }`}
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">2. Product Scanning</label>
+                {isMobile ? (
+                  <button 
+                    onClick={startCamera}
                     disabled={!selectedCustomerId}
-                  />
-                  <Barcode className={`absolute left-4 top-1/2 -translate-y-1/2 w-6 h-6 ${selectedCustomerId ? 'text-green-600' : 'text-slate-400'}`} />
-                  <div className="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-2">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase">Press Enter to Scan</span>
-                  </div>
-                </form>
+                    className={`w-full flex flex-col items-center justify-center gap-2 py-6 rounded-2xl border-2 transition-all ${
+                      selectedCustomerId 
+                        ? 'bg-green-500 text-white border-green-600 shadow-lg active:scale-95' 
+                        : 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed opacity-50'
+                    }`}
+                  >
+                    <Camera className="w-10 h-10" />
+                    <span className="text-lg font-black uppercase tracking-tight">Tap to Scan QR Code</span>
+                  </button>
+                ) : (
+                  <form onSubmit={handleScan} className="relative group">
+                    <input
+                      ref={barcodeInputRef}
+                      value={barcodeInput}
+                      onChange={(e) => setBarcodeInput(e.target.value)}
+                      placeholder="🔍 Ready to scan... point scanner here"
+                      className={`w-full rounded-2xl border-2 px-12 py-4 text-lg font-bold outline-none transition-all ${
+                        selectedCustomerId 
+                          ? 'border-green-500 bg-green-50 focus:ring-4 focus:ring-green-500/20' 
+                          : 'border-slate-200 bg-slate-100 cursor-not-allowed'
+                      }`}
+                      disabled={!selectedCustomerId}
+                    />
+                    <Barcode className={`absolute left-4 top-1/2 -translate-y-1/2 w-6 h-6 ${selectedCustomerId ? 'text-green-600' : 'text-slate-400'}`} />
+                    <div className="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-2">
+                      <span className="text-[10px] font-bold text-slate-400 uppercase">Auto-Refocus ON</span>
+                    </div>
+                  </form>
+                )}
               </div>
             </div>
           </div>
