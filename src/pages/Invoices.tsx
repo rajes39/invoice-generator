@@ -46,7 +46,15 @@ export default function Invoices() {
   const { data: company } = useQuery<CompanySettings>({
     queryKey: ['company_settings_global'],
     queryFn: async () => {
-      const { data } = await supabase.from('company_settings').select('*').limit(1).maybeSingle();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return null;
+      
+      const { data } = await supabase
+        .from('company_settings')
+        .select('*')
+        .eq('user_id', user.id)
+        .maybeSingle();
+      
       return data;
     },
   });

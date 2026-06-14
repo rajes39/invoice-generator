@@ -89,28 +89,19 @@ export default function InvoiceDetails() {
   });
 
   const { data: company, isLoading: isSettingsLoading } = useQuery<CompanySettings>({
-    queryKey: ['company_settings', invoice?.userId],
+    queryKey: ['company_settings_session'],
     queryFn: async () => {
-      if (!invoice?.userId) return null as any;
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return null as any;
       
       const { data } = await supabase
         .from('company_settings')
         .select('*')
-        .eq('user_id', invoice.userId)
+        .eq('user_id', user.id)
         .maybeSingle();
-      
-      if (!data) {
-        const { data: fallbackData } = await supabase
-          .from('company_settings')
-          .select('*')
-          .limit(1)
-          .maybeSingle();
-        return fallbackData;
-      }
       
       return data;
     },
-    enabled: !!invoice?.userId,
   });
 
   // Combine GST Summary for goods and freight
