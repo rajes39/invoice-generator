@@ -5,6 +5,7 @@ import CreditNoteDetails from '../pages/CreditNoteDetails';
 import Customers from '../pages/Customers';
 import Suppliers from '../pages/Suppliers';
 import Products from '../pages/Products';
+import ProductLabels from '../pages/ProductLabels';
 import Warehouses from '../pages/Warehouses';
 import RoutesPage from '../pages/Routes';
 import Dashboard from '../pages/Dashboard';
@@ -77,6 +78,14 @@ export default function AppRoutes() {
         element={
           <ProtectedRoute>
             <Products />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/masters/labels"
+        element={
+          <ProtectedRoute>
+            <ProductLabels />
           </ProtectedRoute>
         }
       />

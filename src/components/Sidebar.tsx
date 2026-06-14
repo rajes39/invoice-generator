@@ -12,6 +12,7 @@ const menuGroups = [
       { label: 'Customers', path: '/masters/customers' },
       { label: 'Suppliers', path: '/masters/suppliers' },
       { label: 'Products', path: '/masters/products' },
+      { label: 'Product Labels', path: '/masters/labels' },
       { label: 'Warehouses', path: '/masters/warehouses' },
       { label: 'Discount Setup', path: '/masters/discounts' },
       { label: 'Net Rate Setup', path: '/masters/net-rates' },
